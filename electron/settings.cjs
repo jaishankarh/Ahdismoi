@@ -73,29 +73,70 @@ const VOICE_PRESETS = {
   openai: ["cedar", "marin", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"],
 };
 
+// Every setting can be given a default in .env.local (see .env.example). The settings panel
+// overrides these; only values you change in the panel are written to settings.json, so
+// .env.local defaults keep applying to everything else.
+function env(name) {
+  const value = process.env[`AHDISMOI_${name}`] ?? process.env[`RICKY_${name}`];
+  return value === undefined || value === "" ? undefined : value;
+}
+
+function envBool(name, fallback) {
+  const value = env(name);
+  if (value === undefined) return fallback;
+  return /^(1|true|yes|on)$/i.test(value);
+}
+
+function envNumber(name, fallback) {
+  const value = Number(env(name));
+  return env(name) !== undefined && Number.isFinite(value) ? value : fallback;
+}
+
+function envTask(prefix, task, fallback) {
+  const provider = env(`${prefix}_PROVIDER`) || fallback.provider;
+  const validProvider = TASKS[task].providers[provider] ? provider : fallback.provider;
+  const model = env(`${prefix}_MODEL`) || (validProvider === fallback.provider ? fallback.model : TASKS[task].providers[validProvider][0]);
+  return { ...fallback, provider: validProvider, model };
+}
+
 function defaultSettings() {
+  const voice = envTask("VOICE", "voice", { provider: "gemini", model: "gemini-3.8-live", voiceName: "Charon" });
+  voice.voiceName = env("VOICE_NAME") || (voice.provider === "gemini" ? "Charon" : VOICE_PRESETS[voice.provider]?.[0] || "");
   return {
-    userName: "",
-    assistantName: "Ahdismoi",
+    userName: env("USER_NAME") || "",
+    assistantName: env("ASSISTANT_NAME") || "Ahdismoi",
     wake: {
-      enabled: false,
-      engine: "vosk",
-      phrase: "ah dis moi",
-      sensitivity: 0.5,
-      sleepAfterSeconds: 10,
-      voskModelUrl: DEFAULT_VOSK_MODEL,
-      porcupineLanguage: "fr",
+      enabled: envBool("WAKE_ENABLED", false),
+      engine: env("WAKE_ENGINE") === "porcupine" ? "porcupine" : "vosk",
+      phrase: env("WAKE_PHRASE") || "ah dis moi",
+      sensitivity: envNumber("WAKE_SENSITIVITY", 0.5),
+      sleepAfterSeconds: envNumber("WAKE_SLEEP_AFTER_SECONDS", 10),
+      voskModelUrl: env("VOSK_MODEL_URL") || DEFAULT_VOSK_MODEL,
+      porcupineLanguage: env("PORCUPINE_LANGUAGE") === "en" ? "en" : "fr",
       porcupineKeywordName: "",
     },
     tasks: {
-      voice: { provider: "gemini", model: "gemini-3.8-live", voiceName: "Charon" },
-      imageGenerate: { provider: "gemini", model: "gemini-3.1-flash-image" },
-      imageEdit: { provider: "gemini", model: "gemini-3.1-flash-image" },
-      search: { provider: "gemini", model: "gemini-3.8-flash" },
-      vision: { provider: "gemini", model: "gemini-3.8-flash" },
+      voice,
+      imageGenerate: envTask("IMAGE", "imageGenerate", { provider: "gemini", model: "gemini-3.1-flash-image" }),
+      imageEdit: envTask("IMAGE_EDIT", "imageEdit", { provider: "gemini", model: "gemini-3.1-flash-image" }),
+      search: envTask("SEARCH", "search", { provider: "gemini", model: "gemini-3.8-flash" }),
+      vision: envTask("VISION", "vision", { provider: "gemini", model: "gemini-3.8-flash" }),
     },
-    pauseMicWhileSpeaking: false,
+    pauseMicWhileSpeaking: envBool("PAUSE_MIC_WHILE_SPEAKING", false),
   };
+}
+
+/** Only keep values that differ from the defaults. */
+function diffFromDefaults(value, defaults) {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      const d = diffFromDefaults(child, defaults?.[key]);
+      if (d !== undefined) out[key] = d;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  return value === defaults ? undefined : value;
 }
 
 let cache = null;
@@ -154,6 +195,13 @@ async function getSettings() {
   return cache;
 }
 
+/** Forget everything changed in the panel; .env.local / built-in defaults apply again. */
+async function resetSettings() {
+  cache = normalizeSettings(null);
+  await writeJson(settingsPath(), {});
+  return cache;
+}
+
 async function saveSettings(partial) {
   const current = await getSettings();
   const merged = {
@@ -166,7 +214,12 @@ async function saveSettings(partial) {
     merged.tasks[task] = { ...current.tasks[task], ...value };
   }
   cache = normalizeSettings(merged);
-  await writeJson(settingsPath(), cache);
+  // A provider change must persist its model too, even if the model equals a default.
+  const stored = diffFromDefaults(cache, defaultSettings()) || {};
+  for (const [task, value] of Object.entries(stored.tasks || {})) {
+    if (value.provider !== undefined) stored.tasks[task] = { ...cache.tasks[task] };
+  }
+  await writeJson(settingsPath(), stored);
   return cache;
 }
 
@@ -252,6 +305,7 @@ module.exports = {
   VOICE_PRESETS,
   getSettings,
   saveSettings,
+  resetSettings,
   setApiKey,
   getApiKey,
   requireApiKey,

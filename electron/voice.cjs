@@ -8,6 +8,7 @@ const crypto = require("node:crypto");
 const { requireApiKey, getSettings } = require("./settings.cjs");
 
 const GEMINI_WS =
+  process.env.AHDISMOI_GEMINI_WS_URL ||
   process.env.RICKY_GEMINI_WS_URL || "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 
 // ---------- OpenAI Realtime ----------

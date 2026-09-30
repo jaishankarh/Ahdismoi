@@ -4,7 +4,9 @@ const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
 const dotenv = require("dotenv");
 
-dotenv.config({ path: path.join(process.cwd(), ".env.local") });
+// .env.local wins over .env; real environment variables win over both.
+dotenv.config({ path: path.join(process.cwd(), ".env.local"), quiet: true });
+dotenv.config({ path: path.join(process.cwd(), ".env"), quiet: true });
 
 const settingsStore = require("./settings.cjs");
 const providers = require("./providers.cjs");
@@ -18,7 +20,7 @@ let geminiSession = null;
 
 // On Wayland, apps can't position their own windows or stay on top, which the floating
 // computer-use face needs. Run through XWayland instead (it's on every mainstream desktop).
-if (computer.detectPlatform() === "wayland" && !process.env.RICKY_NATIVE_WAYLAND) {
+if (computer.detectPlatform() === "wayland" && !(process.env.AHDISMOI_NATIVE_WAYLAND || process.env.RICKY_NATIVE_WAYLAND)) {
   app.commandLine.appendSwitch("ozone-platform", "x11");
 }
 const dataDir = path.join(process.cwd(), "data");
@@ -549,6 +551,12 @@ async function createWindow() {
     if (/^https?:\/\//.test(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
+  win.webContents.on("will-navigate", (event, url) => {
+    const devUrl = process.env.VITE_DEV_SERVER_URL;
+    if (devUrl && url.startsWith(devUrl)) return; // Vite hot reload
+    event.preventDefault();
+    if (/^https?:\/\//.test(url)) void shell.openExternal(url);
+  });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   if (devUrl) {
@@ -616,7 +624,7 @@ async function sessionInstructions() {
 }
 
 // Only the renderer's own UI (a user click) can switch into computer mode.
-ipcMain.handle("mode:set", (_event, mode) => ({ mode: setMode(mode) }));
+ipcMain.handle("mode:set", (_event, mode) => ({ mode: setMode(mode === "computer" && !computer.backend().typeText ? "display" : mode) }));
 ipcMain.handle("mode:get", () => currentMode);
 
 ipcMain.handle("voice:start", async () => {
@@ -663,6 +671,7 @@ ipcMain.handle("settings:get", async () => ({
 }));
 
 ipcMain.handle("settings:save", async (_event, partial) => settingsStore.saveSettings(partial));
+ipcMain.handle("settings:reset", async () => settingsStore.resetSettings());
 
 ipcMain.handle("settings:set-key", async (_event, { provider, value }) => {
   await settingsStore.setApiKey(provider, value);
@@ -692,6 +701,9 @@ ipcMain.handle("tools:execute", async (_event, toolCall) => {
 
   try {
     if (name === "set_mode") {
+      if (args.mode === "computer" && !computer.backend().typeText) {
+        return { ok: false, error: `Computer control isn't available on ${process.platform === "win32" ? "Windows" : process.platform} yet (macOS and Linux only). Tell the user.` };
+      }
       if (args.mode === "computer" && currentMode !== "computer") {
         sendToRenderer("mode:request", { reason: String(args.reason || "") });
         return {

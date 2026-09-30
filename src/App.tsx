@@ -29,6 +29,7 @@ export default function App() {
   const [modeRequest, setModeRequest] = useState<string | null>(null);
   const [wakeState, setWakeState] = useState<WakeState>("off");
   const [wakeNotice, setWakeNotice] = useState("");
+  const [platform, setPlatform] = useState("");
   const clientRef = useRef<VoiceClient | null>(null);
   const settingsRef = useRef<RickySettings | null>(null);
   const wakeRef = useRef<WakeController | null>(null);
@@ -53,6 +54,7 @@ export default function App() {
   useEffect(() => {
     void window.ricky.getSettings().then((bundle) => {
       setSettings(bundle.settings);
+      setPlatform(bundle.platform);
       settingsRef.current = bundle.settings;
       if (bundle.settings.wake.enabled) void startWake(bundle.settings);
       const voiceProvider = bundle.settings.tasks.voice.provider;
@@ -231,7 +233,7 @@ export default function App() {
           voiceConnected={isConnected}
         />
       ) : null}
-      {modeRequest ? (
+      {modeRequest !== null ? (
         <div className="mode-request" role="alertdialog" aria-label="Computer control request">
           <MonitorCog size={16} />
           <span>{modeRequest ? `${assistantName} wants to control your computer: ${modeRequest}` : `${assistantName} wants to control your computer.`}</span>
@@ -305,8 +307,9 @@ export default function App() {
             <button
               className="simple-button danger"
               onClick={() => void switchMode("computer")}
+              disabled={platform === "win32"}
               aria-label="Turn on computer control"
-              title="Turn on computer control (only you can)"
+              title={platform === "win32" ? "Computer control is available on macOS and Linux only" : "Turn on computer control (only you can)"}
             >
               <MonitorCog size={16} />
             </button>

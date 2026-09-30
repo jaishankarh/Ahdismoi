@@ -97,6 +97,7 @@ declare global {
       saveSettings: (
         partial: Partial<Omit<RickySettings, "tasks" | "wake">> & { tasks?: Partial<Record<TaskId, Partial<TaskSetting>>>; wake?: Partial<WakeSettings> },
       ) => Promise<RickySettings>;
+      resetSettings: () => Promise<RickySettings>;
       setApiKey: (provider: ProviderId, value: string) => Promise<SettingsBundle["keys"]>;
       checkModel: (provider: ProviderId, model: string) => Promise<{ ok: boolean; message: string }>;
       computerStatus: () => Promise<ComputerStatus>;

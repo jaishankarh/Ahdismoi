@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("ricky", {
   // Settings
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (partial) => ipcRenderer.invoke("settings:save", partial),
+  resetSettings: () => ipcRenderer.invoke("settings:reset"),
   setApiKey: (provider, value) => ipcRenderer.invoke("settings:set-key", { provider, value }),
   checkModel: (provider, model) => ipcRenderer.invoke("settings:check-model", { provider, model }),
   computerStatus: () => ipcRenderer.invoke("computer:status"),

@@ -343,6 +343,20 @@ export function SettingsPanel({ onClose, onSaved, voiceConnected }: Props) {
         </div>
 
         <footer className="settings-footer">
+          <button
+            className="settings-button"
+            title="Forget changes made here; use .env.local / built-in defaults again (API keys are kept)"
+            onClick={() =>
+              void window.ricky.resetSettings().then((saved) => {
+                setBundle((current) => (current ? { ...current, settings: saved } : current));
+                setDraft(structuredClone(saved));
+                onSaved(saved);
+                setSavedNote("Reset to defaults.");
+              })
+            }
+          >
+            Reset to defaults
+          </button>
           <span className="settings-muted">{savedNote}</span>
           <button className="settings-button" onClick={onClose}>
             Close

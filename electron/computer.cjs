@@ -320,6 +320,7 @@ const EV = {
 
 function ydotoolEnv() {
   const env = { ...process.env };
+  if (!env.YDOTOOL_SOCKET) delete env.YDOTOOL_SOCKET; // an empty value from .env.local means "auto"
   if (!env.YDOTOOL_SOCKET && env.XDG_RUNTIME_DIR) {
     const userSocket = path.join(env.XDG_RUNTIME_DIR, ".ydotool_socket");
     if (require("node:fs").existsSync(userSocket)) env.YDOTOOL_SOCKET = userSocket;
