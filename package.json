@@ -1,15 +1,28 @@
 {
   "name": "rileyjarvis",
   "version": "1.0.0",
-  "description": "A local Electron desktop AI companion powered by OpenAI Realtime.",
+  "description": "A local Electron desktop AI companion with realtime voice (Gemini Live or OpenAI Realtime), images, search and computer control on macOS and Linux.",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
     "start": "electron .",
     "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "setup:linux": "bash scripts/setup-linux.sh"
   },
-  "keywords": ["electron", "openai", "realtime", "voice", "desktop-assistant", "ai-companion"],
+  "keywords": [
+    "electron",
+    "gemini",
+    "gemini-live",
+    "openai",
+    "openrouter",
+    "realtime",
+    "voice",
+    "desktop-assistant",
+    "ai-companion",
+    "linux",
+    "macos"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {

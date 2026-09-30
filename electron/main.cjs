@@ -1,6 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeImage, screen } = require("electron");
-const { execFile } = require("node:child_process");
-const { promisify } = require("node:util");
+const { app, BrowserWindow, desktopCapturer, ipcMain, nativeImage, screen, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const crypto = require("node:crypto");
@@ -8,7 +6,18 @@ const dotenv = require("dotenv");
 
 dotenv.config({ path: path.join(process.cwd(), ".env.local") });
 
-const execFileAsync = promisify(execFile);
+const settingsStore = require("./settings.cjs");
+const providers = require("./providers.cjs");
+const computer = require("./computer.cjs");
+const { createOpenAISession, GeminiLiveSession } = require("./voice.cjs");
+
+let geminiSession = null;
+
+// On Wayland, apps can't position their own windows or stay on top, which the floating
+// computer-use face needs. Run through XWayland instead (it's on every mainstream desktop).
+if (computer.detectPlatform() === "wayland" && !process.env.RICKY_NATIVE_WAYLAND) {
+  app.commandLine.appendSwitch("ozone-platform", "x11");
+}
 const dataDir = path.join(process.cwd(), "data");
 const dbPath = path.join(dataDir, "ricky-db.json");
 let currentMode = "display";
@@ -16,26 +25,32 @@ let mainWindow = null;
 let normalWindowBounds = null;
 let dbWriteQueue = Promise.resolve();
 
-const RICKY_INSTRUCTIONS = `# Role and Objective
-You are Ricky, Riley's desktop AI operator. You speak through realtime voice and can use local tools.
+function buildInstructions(userName) {
+  const name = userName || "the user";
+  return `# Role and Objective
+You are Ricky, ${name}'s desktop AI operator. You speak through realtime voice and can use local tools.
 
 # Personality and Tone
-Concise, calm, useful. Use a confident man's voice. Talk like a smart operator, not a chatbot.
+Concise, calm, useful. Talk like a smart operator, not a chatbot.
 
 # Modes
 - Display mode is the default. Use the app and artifact panel to show things. Do not control the computer.
-- Computer use mode allows desktop control tools. Only use computer tools after the user asks for computer use or asks you to control the computer.
+- Computer use mode allows desktop control tools. Only the user can turn it on, with the toggle in the app. If they ask you to control the computer while in display mode, call set_mode with mode "computer": that shows them a button to approve. Then wait for them to confirm before using computer tools.
+
+# Computer Use
+- Before clicking, call screen_snapshot (optionally with a question like "where is the search box?"). It returns a summary and a list of on-screen elements with click coordinates. Click using those coordinates, then take another snapshot to confirm the result.
+- Prefer keyboard shortcuts (computer_hotkey) and typing over clicking when they are reliable.
 
 # Tool Behavior
 - Use read-only tools when the user's intent is clear.
-- When Riley says "show me the menu", "show me what I can do", or asks what Ricky can do, call show_menu immediately.
+- When ${name} says "show me the menu", "show me what I can do", or asks what Ricky can do, call show_menu immediately.
 - For web search, notes, charts, records, image generation, and artifact display, act directly when the request is clear.
-- For thumbnail creation/editing, always use the thumbnail board tools, never generic image_generate and never artifact_show with imageLoading. Generate exactly one 16:9 image per request. Never generate multiple unless Riley separately asks again. Every generate/edit request gets a permanent database number that never changes, like #18 then #19 then #20. Do not renumber visible grid positions. Show paginated 3x3 pages of the permanent numbers. Do not show a standalone fullscreen loading animation for thumbnails. Use Riley's wording literally: do not invent elaborate extra concepts, fake text, or extra thumbnail ideas. For edits, use the exact existing numbered/selected image as input and make only the requested change.
-- The thumbnail board persists across sessions. If Riley references thumbnail #N, trust that permanent number and call the matching thumbnail tool. Do not say you cannot see old thumbnails. Use thumbnail_grid to refresh state or change pages if needed.
+- For thumbnail creation/editing, always use the thumbnail board tools, never generic image_generate and never artifact_show with imageLoading. Generate exactly one 16:9 image per request. Never generate multiple unless ${name} separately asks again. Every generate/edit request gets a permanent database number that never changes, like #18 then #19 then #20. Do not renumber visible grid positions. Show paginated 3x3 pages of the permanent numbers. Do not show a standalone fullscreen loading animation for thumbnails. Use ${name}'s wording literally: do not invent elaborate extra concepts, fake text, or extra thumbnail ideas. For edits, use the exact existing numbered/selected image as input and make only the requested change.
+- The thumbnail board persists across sessions. If ${name} references thumbnail #N, trust that permanent number and call the matching thumbnail tool. Do not say you cannot see old thumbnails. Use thumbnail_grid to refresh state or change pages if needed.
 - When a thumbnail finishes generating or editing, do not announce it verbally. The UI updates silently.
 - For sending messages, deleting data, buying things, account changes, sharing private information, or anything irreversible, summarize the action and ask for explicit confirmation before calling the modifying tool.
 - If a tool requires a confirmed field, set confirmed to true only after the user clearly confirms.
-- Typing text and pressing Enter/Return in computer use mode are allowed without extra approval when Riley asks you to type or send a prompt. Ask first before clicking controls or taking actions that delete, purchase, change settings, or expose private information.
+- Typing text and pressing Enter/Return in computer use mode are allowed without extra approval when ${name} asks you to type or send a prompt. Ask first before clicking controls or taking actions that delete, purchase, change settings, or expose private information.
 - Explain what you are doing in one short sentence before longer tool work. Do not over-explain.
 
 # Artifacts
@@ -44,12 +59,13 @@ For Mermaid charts, keep syntax simple: start with flowchart TD, avoid markdown 
 
 # Audio
 Let the user interrupt. If audio is unclear, ask one short clarifying question instead of guessing.`;
+}
 
 const toolSpecs = [
   {
     type: "function",
     name: "set_mode",
-    description: "Switch Ricky between display mode and computer use mode.",
+    description: "Switch to display mode, or ask the user to enable computer use mode. Only the user can actually turn computer mode on; calling this with mode computer shows them an approve button.",
     parameters: {
       type: "object",
       properties: {
@@ -89,7 +105,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "web_search",
-    description: "Search the web with Exa. Use for current facts, links, research, and source gathering. Results are shown as a clean Markdown research brief in the artifact panel.",
+    description: "Search the web. Use for current facts, links, research, and source gathering. Results are shown as a clean Markdown research brief in the artifact panel.",
     parameters: {
       type: "object",
       properties: {
@@ -103,7 +119,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "image_generate",
-    description: "Generate a standalone image with GPT Image and show it in the artifact panel. Do not use for YouTube thumbnails, thumbnail edits, or the thumbnail board; use thumbnail_generate or thumbnail_edit instead.",
+    description: "Generate a standalone image and show it in the artifact panel. Do not use for YouTube thumbnails, thumbnail edits, or the thumbnail board; use thumbnail_generate or thumbnail_edit instead.",
     parameters: {
       type: "object",
       properties: {
@@ -117,7 +133,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "thumbnail_reference_add",
-    description: "Add a local image file as a reference image for making thumbnails of Riley. Use when Riley gives a file path to a photo of himself.",
+    description: "Add a local image file as a reference image for making thumbnails of the user. Use when the user gives a file path to a photo of themselves.",
     parameters: {
       type: "object",
       properties: {
@@ -131,7 +147,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "thumbnail_generate",
-    description: "Generate exactly one 16:9 YouTube thumbnail into Ricky's persistent paginated thumbnail board. Uses Riley reference images if available. Assigns a new permanent number that never changes. Never generate multiple at once.",
+    description: "Generate exactly one 16:9 YouTube thumbnail into Ricky's persistent paginated thumbnail board. Uses the user's reference images if available. Assigns a new permanent number that never changes. Never generate multiple at once.",
     parameters: {
       type: "object",
       properties: {
@@ -144,7 +160,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "thumbnail_edit",
-    description: "Edit one existing thumbnail by permanent thumbnail number, or edit the currently selected thumbnail if number is omitted. Use this whenever Riley says 'edit number 20' or 'edit this'. The edited result gets a new permanent number.",
+    description: "Edit one existing thumbnail by permanent thumbnail number, or edit the currently selected thumbnail if number is omitted. Use this whenever the user says 'edit number 20' or 'edit this'. The edited result gets a new permanent number.",
     parameters: {
       type: "object",
       properties: {
@@ -158,7 +174,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "thumbnail_select",
-    description: "Select a permanent numbered thumbnail and show it fullscreen. Use when Riley says 'pull up number 20', 'show number 20', 'open number 20', or 'select number 20'.",
+    description: "Select a permanent numbered thumbnail and show it fullscreen. Use when the user says 'pull up number 20', 'show number 20', 'open number 20', or 'select number 20'.",
     parameters: {
       type: "object",
       properties: {
@@ -171,7 +187,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "thumbnail_grid",
-    description: "Show one paginated 3x3 page of the persistent thumbnail board and return compact board state. Use to refresh state, change pages, or when Riley asks what thumbnails exist.",
+    description: "Show one paginated 3x3 page of the persistent thumbnail board and return compact board state. Use to refresh state, change pages, or when the user asks what thumbnails exist.",
     parameters: {
       type: "object",
       properties: {
@@ -270,7 +286,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "computer_open_app",
-    description: "Open a macOS app by name. Requires computer mode.",
+    description: "Open an installed desktop app by name (e.g. Firefox, Notes, Terminal, Visual Studio Code). Requires computer mode.",
     parameters: {
       type: "object",
       properties: {
@@ -283,7 +299,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "computer_type_text",
-    description: "Type text into the active app. Requires computer mode. Do not ask for extra confirmation just to type.",
+    description: "Type text into the focused app. Requires computer mode. Do not ask for extra confirmation just to type.",
     parameters: {
       type: "object",
       properties: {
@@ -298,11 +314,11 @@ const toolSpecs = [
   {
     type: "function",
     name: "computer_press_key",
-    description: "Press a keyboard key in the active app. Requires computer mode. Use enter/return after typing when the user asks to send a prompt.",
+    description: "Press a keyboard key in the focused app. Requires computer mode. Use enter after typing when the user asks to send a prompt.",
     parameters: {
       type: "object",
       properties: {
-        key: { type: "string", enum: ["enter", "return", "tab", "escape", "delete", "space", "up", "down", "left", "right"] },
+        key: { type: "string", enum: ["enter", "tab", "escape", "backspace", "delete", "space", "up", "down", "left", "right", "home", "end", "pageup", "pagedown"] },
         repeat: { type: "number", minimum: 1, maximum: 20 },
       },
       required: ["key"],
@@ -311,13 +327,30 @@ const toolSpecs = [
   },
   {
     type: "function",
+    name: "computer_hotkey",
+    description: "Press a keyboard shortcut, e.g. modifiers [\"cmd\"] + key \"l\" to focus a browser address bar. \"cmd\" means Command on macOS and Ctrl on Linux. Requires computer mode. Ask first for shortcuts that close, delete, or quit.",
+    parameters: {
+      type: "object",
+      properties: {
+        modifiers: { type: "array", items: { type: "string", enum: ["cmd", "ctrl", "alt", "shift", "super"] } },
+        key: { type: "string", description: "A single letter or digit, or a key name like enter, tab, escape, up, f5." },
+        confirmed: { type: "boolean" },
+      },
+      required: ["modifiers", "key"],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
     name: "computer_click",
-    description: "Click screen coordinates. Requires computer mode. Ask for confirmation before clicking buttons that send, delete, buy, submit, or change settings.",
+    description: "Click at screen coordinates taken from screen_snapshot. Requires computer mode. Ask for confirmation before clicking buttons that send, delete, buy, submit, or change settings.",
     parameters: {
       type: "object",
       properties: {
         x: { type: "number" },
         y: { type: "number" },
+        button: { type: "string", enum: ["left", "right", "middle"] },
+        double: { type: "boolean" },
         confirmed: { type: "boolean" },
         risk: { type: "string", enum: ["low", "may_send_or_modify", "private_or_sensitive"] },
       },
@@ -328,7 +361,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "computer_scroll",
-    description: "Scroll the active app. Requires computer mode.",
+    description: "Scroll the app under the mouse pointer (on macOS: the focused app, using arrow keys). Requires computer mode.",
     parameters: {
       type: "object",
       properties: {
@@ -342,17 +375,19 @@ const toolSpecs = [
   {
     type: "function",
     name: "screen_snapshot",
-    description: "Capture the current screen and return the local screenshot path. Requires computer mode.",
+    description: "Look at the screen. Returns a summary and a list of visible elements with click coordinates. Pass a question to focus it, e.g. 'where is the send button?'. Requires computer mode.",
     parameters: {
       type: "object",
-      properties: {},
+      properties: {
+        question: { type: "string" },
+      },
       additionalProperties: false,
     },
   },
   {
     type: "function",
     name: "ui_inspect",
-    description: "Inspect the frontmost macOS app name, window, and visible UI summary using Accessibility when available. Requires computer mode.",
+    description: "Get the focused app and window title (limited on Linux Wayland). Requires computer mode.",
     parameters: {
       type: "object",
       properties: {},
@@ -452,7 +487,7 @@ function requireComputerMode() {
     return {
       ok: false,
       needsMode: "computer",
-      message: "Computer control is disabled. Ask Ricky to switch to computer use mode first.",
+      message: "Computer control is off. Call set_mode with mode computer so the user can approve it with the toggle.",
     };
   }
   return null;
@@ -462,27 +497,8 @@ function requiresConfirmation(args) {
   return args.confirmed !== true && (args.risk === "may_send_or_modify" || args.risk === "private_or_sensitive");
 }
 
-function keyCodeForKey(key) {
-  const keyCodes = {
-    enter: 36,
-    return: 36,
-    tab: 48,
-    escape: 53,
-    delete: 51,
-    space: 49,
-    up: 126,
-    down: 125,
-    left: 123,
-    right: 124,
-  };
-  return keyCodes[String(key || "").toLowerCase()] || null;
-}
-
-function appleScriptString(value) {
-  return JSON.stringify(String(value)).replace(/\\\\/g, "\\");
-}
-
 async function createWindow() {
+  computer.init({ screen, desktopCapturer });
   await ensureData();
   await clearStartupLoadingThumbnails();
   const win = new BrowserWindow({
@@ -505,6 +521,12 @@ async function createWindow() {
 
   win.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media");
+  });
+
+  // Links (e.g. "Get key", search sources) open in the default browser, never inside the app.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
@@ -555,62 +577,86 @@ function setWindowMode(mode) {
 
 ipcMain.handle("tools:list", () => toolSpecs);
 
-ipcMain.handle("realtime:create-token", async () => {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error("OPENAI_API_KEY is missing in .env.local");
-  }
+function sendToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+function setMode(mode) {
+  currentMode = mode === "computer" ? "computer" : "display";
+  setWindowMode(currentMode);
+  sendToRenderer("mode:changed", currentMode);
+  return currentMode;
+}
+
+async function sessionInstructions() {
+  const settings = await settingsStore.getSettings();
   const db = await readDb();
-  const instructions = `${RICKY_INSTRUCTIONS}\n\n${buildThumbnailBoardInstructions(db)}`;
+  return `${buildInstructions(settings.userName)}\n\n${buildThumbnailBoardInstructions(db, settings.userName || "the user")}`;
+}
 
-  const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "OpenAI-Safety-Identifier": crypto.createHash("sha256").update("riley-local-ricky").digest("hex"),
+// Only the renderer's own UI (a user click) can switch into computer mode.
+ipcMain.handle("mode:set", (_event, mode) => ({ mode: setMode(mode) }));
+ipcMain.handle("mode:get", () => currentMode);
+
+ipcMain.handle("voice:start", async () => {
+  const settings = await settingsStore.getSettings();
+  const instructions = await sessionInstructions();
+  if (settings.tasks.voice.provider === "openai") {
+    return await createOpenAISession({ instructions, tools: toolSpecs });
+  }
+  geminiSession?.close();
+  const session = new GeminiLiveSession({
+    send: sendToRenderer,
+    onClose: () => {
+      if (geminiSession === session) geminiSession = null;
     },
-    body: JSON.stringify({
-      session: {
-        type: "realtime",
-        model: "gpt-realtime-2",
-        instructions,
-        output_modalities: ["audio"],
-        reasoning: { effort: "low" },
-        tool_choice: "auto",
-        tools: toolSpecs,
-        audio: {
-          input: {
-            turn_detection: {
-              type: "semantic_vad",
-              eagerness: "medium",
-              create_response: true,
-              interrupt_response: true,
-            },
-          },
-          output: {
-            voice: "cedar",
-          },
-        },
-        tracing: {
-          workflow_name: "Ricky Desktop Companion",
-        },
-      },
-    }),
   });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Realtime token request failed: ${response.status} ${text}`);
+  geminiSession = session;
+  try {
+    return await session.start({ instructions, tools: toolSpecs });
+  } catch (error) {
+    session.close();
+    if (geminiSession === session) geminiSession = null;
+    throw error;
   }
-
-  const data = await response.json();
-  const value = data.value || data.client_secret?.value;
-  if (!value) {
-    throw new Error("Realtime token response did not include a client secret value.");
-  }
-  return { value, expiresAt: data.expires_at || data.client_secret?.expires_at || null };
 });
+
+ipcMain.on("voice:gemini-send", (_event, message) => {
+  geminiSession?.sendClient(message);
+});
+
+ipcMain.handle("voice:stop", () => {
+  geminiSession?.close();
+  geminiSession = null;
+  return true;
+});
+
+ipcMain.handle("settings:get", async () => ({
+  settings: await settingsStore.getSettings(),
+  tasks: settingsStore.TASKS,
+  providers: settingsStore.PROVIDERS,
+  voices: settingsStore.VOICE_PRESETS,
+  keys: await settingsStore.keyStatus(),
+  encryption: settingsStore.encryptionInfo(),
+  platform: process.platform,
+}));
+
+ipcMain.handle("settings:save", async (_event, partial) => settingsStore.saveSettings(partial));
+
+ipcMain.handle("settings:set-key", async (_event, { provider, value }) => {
+  await settingsStore.setApiKey(provider, value);
+  return settingsStore.keyStatus();
+});
+
+ipcMain.handle("settings:check-model", async (_event, { provider, model }) => {
+  try {
+    return { ok: true, message: await providers.checkModel(provider, model) };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("computer:status", async () => computer.status());
 
 ipcMain.handle("tools:execute", async (_event, toolCall) => {
   const name = String(toolCall?.name || "");
@@ -618,16 +664,19 @@ ipcMain.handle("tools:execute", async (_event, toolCall) => {
 
   try {
     if (name === "set_mode") {
-      currentMode = args.mode === "computer" ? "computer" : "display";
-      setWindowMode(currentMode);
+      if (args.mode === "computer" && currentMode !== "computer") {
+        sendToRenderer("mode:request", { reason: String(args.reason || "") });
+        return {
+          ok: false,
+          needsUserApproval: true,
+          message: "Only the user can turn on computer control. An 'Allow computer control' button is now showing in the app; ask them to click it, then continue.",
+        };
+      }
+      const mode = setMode(args.mode === "computer" ? "computer" : "display");
       return {
         ok: true,
-        mode: currentMode,
-        artifact: {
-          title: "Ricky Mode",
-          kind: "progress",
-          content: `Mode switched to ${currentMode === "computer" ? "computer use" : "display"} mode.`,
-        },
+        mode,
+        artifact: { title: "Ricky Mode", kind: "progress", content: `Mode is ${mode === "computer" ? "computer use" : "display"}.` },
       };
     }
 
@@ -767,84 +816,7 @@ ipcMain.handle("tools:execute", async (_event, toolCall) => {
     if (name.startsWith("computer_") || name === "screen_snapshot" || name === "ui_inspect") {
       const blocked = requireComputerMode();
       if (blocked) return blocked;
-    }
-
-    if (name === "computer_open_app") {
-      await execFileAsync("open", ["-a", String(args.appName || "")]);
-      return { ok: true, message: `Opened ${args.appName}.` };
-    }
-
-    if (name === "computer_type_text") {
-      await execFileAsync("osascript", ["-e", `tell application "System Events" to keystroke ${appleScriptString(args.text || "")}`]);
-      return { ok: true, message: "Typed text into the active app." };
-    }
-
-    if (name === "computer_press_key") {
-      const keyCode = keyCodeForKey(args.key);
-      if (!keyCode) {
-        return { ok: false, error: `Unsupported key: ${args.key}` };
-      }
-      const repeat = Math.max(1, Math.min(20, Number(args.repeat || 1)));
-      await execFileAsync("osascript", ["-e", `tell application "System Events" to repeat ${repeat} times\nkey code ${keyCode}\nend repeat`]);
-      return { ok: true, message: `Pressed ${args.key}.` };
-    }
-
-    if (name === "computer_click") {
-      if (requiresConfirmation(args)) {
-        return { ok: false, requiresConfirmation: true, message: "Confirmation required before clicking a risky target." };
-      }
-      await execFileAsync("osascript", ["-e", `tell application "System Events" to click at {${Number(args.x)}, ${Number(args.y)}}`]);
-      return { ok: true, message: `Clicked ${args.x}, ${args.y}.` };
-    }
-
-    if (name === "computer_scroll") {
-      const direction = String(args.direction || "down");
-      const amount = Math.max(1, Math.min(20, Number(args.amount || 4)));
-      const keyByDirection = { up: 126, down: 125, left: 123, right: 124 };
-      const keyCode = keyByDirection[direction] || 125;
-      await execFileAsync("osascript", ["-e", `tell application "System Events" to repeat ${amount} times\nkey code ${keyCode}\nend repeat`]);
-      return { ok: true, message: `Scrolled ${direction}.` };
-    }
-
-    if (name === "screen_snapshot") {
-      await fs.mkdir(dataDir, { recursive: true });
-      const screenshotPath = path.join(dataDir, `screenshot-${Date.now()}.png`);
-      await execFileAsync("screencapture", ["-x", screenshotPath]);
-      return {
-        ok: true,
-        path: screenshotPath,
-        artifact: {
-          title: "Screen Snapshot",
-          kind: "image",
-          content: screenshotPath,
-        },
-      };
-    }
-
-    if (name === "ui_inspect") {
-      const script = `tell application "System Events"
-set frontApp to first application process whose frontmost is true
-set appName to name of frontApp
-set windowName to ""
-try
-  set windowName to name of front window of frontApp
-end try
-set roleSummary to ""
-try
-  set roleSummary to value of attribute "AXRoleDescription" of front window of frontApp
-end try
-return "App: " & appName & linefeed & "Window: " & windowName & linefeed & "Role: " & roleSummary
-end tell`;
-      const { stdout } = await execFileAsync("osascript", ["-e", script]);
-      return {
-        ok: true,
-        summary: stdout.trim(),
-        artifact: {
-          title: "UI Inspect",
-          kind: "text",
-          content: stdout.trim(),
-        },
-      };
+      return await runComputerTool(name, args);
     }
 
     return { ok: false, error: `Unknown tool: ${name}` };
@@ -853,66 +825,170 @@ end tell`;
   }
 });
 
-async function webSearch(args) {
-  const exaKey = process.env.EXA_API_KEY;
-  if (!exaKey) {
+async function runComputerTool(name, args) {
+  const backend = computer.backend();
+  if (!backend.typeText) {
+    return { ok: false, error: `Computer control is not supported on ${process.platform}.` };
+  }
+
+  if (name === "computer_open_app") {
+    const appName = String(args.appName || "").trim();
+    if (!appName) return { ok: false, error: "appName is required." };
+    await backend.openApp(appName);
+    return { ok: true, message: `Opened ${appName}.` };
+  }
+
+  if (name === "computer_type_text") {
+    if (requiresConfirmation(args)) {
+      return { ok: false, requiresConfirmation: true, message: "Confirmation required before typing sensitive or sending text." };
+    }
+    await backend.typeText(String(args.text || ""));
+    return { ok: true, message: "Typed text into the focused app." };
+  }
+
+  if (name === "computer_press_key") {
+    const key = computer.normalizeKey(args.key);
+    if (!key) return { ok: false, error: `Unsupported key: ${args.key}` };
+    const repeat = Math.max(1, Math.min(20, Number(args.repeat || 1)));
+    await backend.pressKey(key, repeat);
+    return { ok: true, message: `Pressed ${key}.` };
+  }
+
+  if (name === "computer_hotkey") {
+    const modifiers = (Array.isArray(args.modifiers) ? args.modifiers : [])
+      .map((mod) => String(mod).toLowerCase())
+      .filter((mod) => computer.MODIFIERS.includes(mod));
+    const key = String(args.key || "").toLowerCase().trim();
+    if (!key) return { ok: false, error: "key is required." };
+    const dangerous = modifiers.length > 0 && ["q", "w", "f4", "delete", "backspace"].includes(key);
+    if (dangerous && args.confirmed !== true) {
+      return { ok: false, requiresConfirmation: true, message: "That shortcut can close or delete things. Confirm with the user, then call again with confirmed true." };
+    }
+    await backend.hotkey(modifiers, key);
+    return { ok: true, message: `Pressed ${[...modifiers, key].join("+")}.` };
+  }
+
+  if (name === "computer_click") {
+    if (requiresConfirmation(args)) {
+      return { ok: false, requiresConfirmation: true, message: "Confirmation required before clicking a risky target." };
+    }
+    const x = Number(args.x);
+    const y = Number(args.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { ok: false, error: "x and y must be numbers." };
+    await backend.click(x, y, String(args.button || "left"), args.double === true);
+    return { ok: true, message: `Clicked ${Math.round(x)}, ${Math.round(y)}.` };
+  }
+
+  if (name === "computer_scroll") {
+    const direction = ["up", "down", "left", "right"].includes(args.direction) ? args.direction : "down";
+    const amount = Math.max(1, Math.min(20, Number(args.amount || 4)));
+    await backend.scroll(direction, amount);
+    return { ok: true, message: `Scrolled ${direction}.` };
+  }
+
+  if (name === "screen_snapshot") {
+    await fs.mkdir(dataDir, { recursive: true });
+    const screenshotPath = path.join(dataDir, `screenshot-${Date.now()}.png`);
+    // Hide Ricky's own mini window so it doesn't cover what we're looking at.
+    const hidden = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible();
+    // setOpacity is a no-op on Linux, so hide the window there instead (showInactive keeps
+    // keyboard focus on the app being controlled).
+    const useHide = process.platform === "linux";
+    if (hidden) useHide ? mainWindow.hide() : mainWindow.setOpacity(0);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, hidden ? 180 : 0));
+      await backend.screenshot(screenshotPath);
+    } finally {
+      if (hidden) useHide ? mainWindow.showInactive() : mainWindow.setOpacity(1);
+    }
+    const dataUrl = await imageDataUrl(screenshotPath);
+    const artifact = { title: "Screen Snapshot", kind: "image", content: dataUrl };
+
+    let vision;
+    try {
+      vision = await providers.describeScreen({ imagePath: screenshotPath, question: String(args.question || "") });
+    } catch (error) {
+      return {
+        ok: false,
+        error: `Took the screenshot but the screen-understanding model failed: ${error instanceof Error ? error.message : String(error)}`,
+        artifact,
+      };
+    } finally {
+      pruneScreenshots().catch(() => {});
+    }
+
+    const space = await backend.screenSize();
+    const elements = vision.elements.map((element) => ({
+      label: element.label,
+      x: Math.round((Math.max(0, Math.min(1000, element.x)) / 1000) * space.width),
+      y: Math.round((Math.max(0, Math.min(1000, element.y)) / 1000) * space.height),
+    }));
     return {
-      ok: false,
-      missingEnv: "EXA_API_KEY",
-      message: "EXA_API_KEY is not set. Add it to .env.local to enable Ricky's web search tool.",
+      ok: true,
+      summary: vision.summary,
+      screen: space,
+      elements,
+      note: "Coordinates are ready to pass to computer_click.",
+      artifact,
     };
   }
 
-  const response = await fetch("https://api.exa.ai/search", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": exaKey,
-    },
-    body: JSON.stringify({
-      query: String(args.query || ""),
-      type: "auto",
-      numResults: Math.max(1, Math.min(10, Number(args.numResults || 5))),
-      contents: { text: { maxCharacters: 900 } },
-    }),
-  });
-
-  if (!response.ok) {
-    return { ok: false, error: `Exa search failed: ${response.status} ${await response.text()}` };
+  if (name === "ui_inspect") {
+    const summary = await backend.activeWindow();
+    return { ok: true, summary, artifact: { title: "UI Inspect", kind: "text", content: summary } };
   }
-  const data = await response.json();
-  const results = Array.isArray(data.results) ? data.results : [];
-  return {
-    ok: true,
-    results,
-    artifact: {
-      title: `Web Search: ${args.query}`,
-      kind: "markdown",
-      content: formatSearchMarkdown(String(args.query || ""), results),
-    },
-  };
+
+  return { ok: false, error: `Unknown computer tool: ${name}` };
 }
 
-function formatSearchMarkdown(query, results) {
+// Keep only the 20 most recent screenshots on disk.
+async function pruneScreenshots() {
+  const files = (await fs.readdir(dataDir)).filter((file) => /^screenshot-\d+\.png$/.test(file)).sort();
+  for (const file of files.slice(0, Math.max(0, files.length - 20))) {
+    await fs.unlink(path.join(dataDir, file)).catch(() => {});
+  }
+}
+
+async function webSearch(args) {
+  const query = String(args.query || "");
+  try {
+    const { answer, sources } = await providers.webSearch({ query, numResults: Number(args.numResults || 5) });
+    return {
+      ok: true,
+      answer: answer.slice(0, 1500),
+      sources: sources.slice(0, 8).map((source) => ({ title: source.title, url: source.url })),
+      artifact: { title: `Web Search: ${query}`, kind: "markdown", content: formatSearchMarkdown(query, answer, sources) },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      error: message,
+      artifact: { title: "Web search failed", kind: "markdown", content: `# Web search failed\n\n${cleanMarkdownText(message)}\n\nCheck the search provider and API key in Settings.` },
+    };
+  }
+}
+
+function formatSearchMarkdown(query, answer, results) {
   const cleanQuery = query.trim() || "Search";
-  if (results.length === 0) {
+  if (!answer && results.length === 0) {
     return `# ${cleanQuery}\n\nNo strong web results came back for this search. Try a narrower query or ask Ricky to search a specific site.`;
   }
 
   const sections = results.slice(0, 8).map((result, index) => {
     const title = cleanMarkdownText(result.title || result.url || `Result ${index + 1}`);
     const url = String(result.url || "");
-    const source = cleanMarkdownText(result.author || hostname(url) || "Source");
-    const text = cleanMarkdownText(result.text || result.summary || "").slice(0, 700);
-    const published = result.publishedDate ? `\n- Published: ${cleanMarkdownText(result.publishedDate)}` : "";
+    const source = cleanMarkdownText(hostname(url) || "Source");
+    const text = cleanMarkdownText(result.snippet || "").slice(0, 700);
+    const published = result.published ? `\n- Published: ${cleanMarkdownText(result.published)}` : "";
     const link = url ? `[Open source](${url})` : "Source link unavailable";
-
-    return `### ${index + 1}. ${title}\n\n${text || "No snippet was returned for this result."}\n\n- Source: ${source}${published}\n- ${link}`;
+    return `### ${index + 1}. ${title}${text ? `\n\n${text}` : ""}\n\n- Source: ${source}${published}\n- ${link}`;
   });
 
-  return [`# ${cleanQuery}`, `Ricky found ${results.length} source${results.length === 1 ? "" : "s"}.`, ...sections].join(
-    "\n\n",
-  );
+  const parts = [`# ${cleanQuery}`];
+  if (answer) parts.push(answer.trim(), "## Sources");
+  else parts.push(`Ricky found ${results.length} source${results.length === 1 ? "" : "s"}.`);
+  return [...parts, ...sections].join("\n\n");
 }
 
 function cleanMarkdownText(value) {
@@ -956,7 +1032,7 @@ Here is what you can ask me to do.
 
 ## Visuals
 
-- Generate images with GPT Image.
+- Generate images with the image model chosen in Settings.
 - Create Mermaid charts with automatic fallback if the syntax breaks.
 - Draft diagrams, code snippets, structured notes, and visual explanations.
 
@@ -967,8 +1043,8 @@ Here is what you can ask me to do.
 
 ## Computer Use Mode
 
-- "Switch to computer use mode."
-- Open apps, click, type, press Enter/Return, scroll, inspect the UI, and take screen snapshots.
+- Turn on computer control with the monitor button (only you can).
+- Open apps, look at the screen, click, type, use shortcuts, scroll, and inspect the UI.
 - Ricky asks before risky actions like sending, deleting, buying, changing settings, or sharing private info.
 
 ## Good Starter Prompts
@@ -977,54 +1053,27 @@ Here is what you can ask me to do.
 - "Search the web for the latest AI video tools."
 - "Create a chart of my workflow."
 - "Add a note: follow up on the sponsor."
-- "Switch to computer use mode and open Notes."`;
+- "Open my browser and search for ..." (after enabling computer control)`;
 }
 
+const SIZE_TO_SHAPE = { "1024x1024": "square", "1024x1536": "portrait", "1536x1024": "landscape" };
+
 async function generateImage(args) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return imageErrorArtifact("OPENAI_API_KEY is missing in .env.local.");
-  }
-
-  const response = await fetch("https://api.openai.com/v1/images/generations", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-image-2",
+  try {
+    const image = await providers.generateImage({
+      task: "imageGenerate",
       prompt: String(args.prompt || ""),
-      size: String(args.size || "1024x1024"),
-      quality: "medium",
-    }),
-  });
-
-  if (!response.ok) {
-    return imageErrorArtifact(`Image generation failed: ${response.status} ${await response.text()}`);
-  }
-
-  const data = await response.json();
-  const b64 = data.data?.[0]?.b64_json;
-  const url = data.data?.[0]?.url;
-  if (b64) {
-    await fs.mkdir(dataDir, { recursive: true });
-    const imagePath = path.join(dataDir, `ricky-image-${Date.now()}.png`);
-    await fs.writeFile(imagePath, Buffer.from(b64, "base64"));
+      shape: SIZE_TO_SHAPE[String(args.size || "1024x1024")] || "square",
+    });
+    const saved = await saveImage(image, "ricky-image");
     return {
       ok: true,
-      path: imagePath,
-      artifact: {
-        title: "Generated Image",
-        kind: "image",
-        content: `data:image/png;base64,${b64}`,
-      },
+      path: saved.path,
+      artifact: { title: "Generated Image", kind: "image", content: saved.dataUrl },
     };
+  } catch (error) {
+    return imageErrorArtifact(error instanceof Error ? error.message : String(error));
   }
-  if (url) {
-    return { ok: true, url, artifact: { title: "Generated Image", kind: "image", content: url } };
-  }
-  return imageErrorArtifact("Image response did not include image data.");
 }
 
 function imageErrorArtifact(error) {
@@ -1034,7 +1083,7 @@ function imageErrorArtifact(error) {
     artifact: {
       title: "Image Generation Failed",
       kind: "markdown",
-      content: `# Image generation failed\n\n${cleanMarkdownText(error)}\n\nTry a shorter prompt, a different size, or check model access for \`gpt-image-2\`.`,
+      content: `# Image generation failed\n\n${cleanMarkdownText(error)}\n\nTry a shorter prompt, or check the image model and API key in Settings.`,
     },
   };
 }
@@ -1218,83 +1267,21 @@ async function thumbnailSelect(args) {
   };
 }
 
-async function createThumbnailImage({ prompt, size, inputPaths }) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error("OPENAI_API_KEY is missing in .env.local.");
-  }
-
-  if (inputPaths.length > 0) {
-    return await editImageWithInputs({ apiKey, prompt, size, inputPaths });
-  }
-
-  const response = await fetch("https://api.openai.com/v1/images/generations", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-image-2",
-      prompt,
-      size,
-      quality: "medium",
-    }),
+async function createThumbnailImage({ prompt, inputPaths }) {
+  const image = await providers.generateImage({
+    task: inputPaths.length > 0 ? "imageEdit" : "imageGenerate",
+    prompt,
+    shape: "thumbnail",
+    inputPaths,
   });
-
-  if (!response.ok) {
-    throw new Error(`Thumbnail generation failed: ${response.status} ${await response.text()}`);
-  }
-
-  const data = await response.json();
-  return await saveImageResponse(data, "thumbnail");
+  return await saveImage(image, "thumbnail");
 }
 
-async function editImageWithInputs({ apiKey, prompt, size, inputPaths }) {
-  const buildForm = async (imageFieldName) => {
-    const form = new FormData();
-    form.append("model", "gpt-image-2");
-    form.append("prompt", prompt);
-    form.append("size", size);
-    form.append("quality", "medium");
-    for (const inputPath of inputPaths.slice(0, 10)) {
-      const buffer = await fs.readFile(inputPath);
-      form.append(imageFieldName, new Blob([buffer], { type: mimeForPath(inputPath) }), path.basename(inputPath));
-    }
-    return form;
-  };
-
-  let response = await fetch("https://api.openai.com/v1/images/edits", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: await buildForm("image[]"),
-  });
-
-  if (!response.ok) {
-    const firstError = await response.text();
-    response = await fetch("https://api.openai.com/v1/images/edits", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: await buildForm("image"),
-    });
-    if (!response.ok) {
-      throw new Error(`Thumbnail edit failed: ${response.status} ${await response.text() || firstError}`);
-    }
-  }
-
-  const data = await response.json();
-  return await saveImageResponse(data, "thumbnail");
-}
-
-async function saveImageResponse(data, prefix) {
-  const b64 = data.data?.[0]?.b64_json;
-  if (!b64) {
-    throw new Error("Image response did not include image data.");
-  }
+async function saveImage(image, prefix) {
   await fs.mkdir(dataDir, { recursive: true });
-  const imagePath = path.join(dataDir, `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.png`);
-  await fs.writeFile(imagePath, Buffer.from(b64, "base64"));
-  return { path: imagePath, dataUrl: `data:image/png;base64,${b64}` };
+  const imagePath = path.join(dataDir, `${prefix}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}${providers.extForMime(image.mimeType)}`);
+  await fs.writeFile(imagePath, Buffer.from(image.data, "base64"));
+  return { path: imagePath, dataUrl: `data:${image.mimeType};base64,${image.data}` };
 }
 
 function thumbnailRecord(image, prompt, type, size) {
@@ -1310,7 +1297,7 @@ function thumbnailRecord(image, prompt, type, size) {
 
 function thumbnailPrompt(prompt, hasReferences) {
   return [
-    hasReferences ? "Use the provided reference image(s) of Riley as the identity reference." : "",
+    hasReferences ? "Use the provided reference image(s) of the person as the identity reference." : "",
     "Create one 16:9 YouTube thumbnail.",
     "Follow this request literally. Do not add extra concepts, fake UI, extra text, watermarks, or unrelated elements.",
     prompt,
@@ -1433,7 +1420,7 @@ function thumbnailBoardSummary(db) {
   };
 }
 
-function buildThumbnailBoardInstructions(db) {
+function buildThumbnailBoardInstructions(db, name = "the user") {
   const summary = thumbnailBoardSummary(db);
   const imageLines = summary.images.length
     ? summary.images
@@ -1451,7 +1438,7 @@ Next new thumbnail number: ${summary.page.nextNumber}
 Visible permanent thumbnail numbers:
 ${imageLines}
 
-When Riley says "pull up number N", "select N", or "show N", call thumbnail_select with that permanent number. When Riley says "edit this", use thumbnail_edit with no number if a selected thumbnail number exists. When Riley says "edit number N", call thumbnail_edit with that permanent number. When he asks for older thumbnails or another page, call thumbnail_grid with the requested page. Do not claim you cannot see prior thumbnails; this board state is persistent and paginated.`;
+When ${name} says "pull up number N", "select N", or "show N", call thumbnail_select with that permanent number. When ${name} says "edit this", use thumbnail_edit with no number if a selected thumbnail number exists. When ${name} says "edit number N", call thumbnail_edit with that permanent number. When they ask for older thumbnails or another page, call thumbnail_grid with the requested page. Do not claim you cannot see prior thumbnails; this board state is persistent and paginated.`;
 }
 
 async function thumbnailBoardArtifact(db, view) {

@@ -1,9 +1,10 @@
-import { useRef, useState } from "react";
-import { BrainCircuit, Expand, History, Keyboard, Mic, MicOff, MonitorCog, PanelRight, Send } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { BrainCircuit, Expand, History, Keyboard, Mic, MicOff, MonitorCog, PanelRight, Send, Settings } from "lucide-react";
 import { ArtifactPanel } from "./components/ArtifactPanel";
 import { RickyFace } from "./components/RickyFace";
-import { newEntry, RickyRealtimeClient, type MouthShape, type RickyConnectionState, type RickyMood, type TranscriptEntry } from "./lib/realtime";
-import type { RickyArtifact } from "./vite-env";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { createVoiceClient, newEntry, type MouthShape, type RickyConnectionState, type RickyMood, type TranscriptEntry, type VoiceClient } from "./lib/voice";
+import type { RickyArtifact, RickySettings } from "./vite-env";
 
 type RickyMode = "display" | "computer";
 
@@ -22,12 +23,50 @@ export default function App() {
   ]);
   const [status, setStatus] = useState("Idle");
   const [textPrompt, setTextPrompt] = useState("");
-  const clientRef = useRef<RickyRealtimeClient | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<RickySettings | null>(null);
+  const [modeRequest, setModeRequest] = useState<string | null>(null);
+  const clientRef = useRef<VoiceClient | null>(null);
 
   const isConnected = connectionState === "connected";
 
+  useEffect(() => {
+    void window.ricky.getSettings().then((bundle) => {
+      setSettings(bundle.settings);
+      const voiceProvider = bundle.settings.tasks.voice.provider;
+      if (!bundle.keys[voiceProvider]?.set) {
+        addLog(`Add your ${bundle.providers[voiceProvider].label} API key in Settings (gear icon) to start.`);
+      }
+    });
+    const offChanged = window.ricky.onModeChanged((nextMode) => applyMode(nextMode));
+    const offRequest = window.ricky.onModeRequest(({ reason }) => setModeRequest(reason || "Ricky wants to control your computer."));
+    return () => {
+      offChanged();
+      offRequest();
+    };
+  }, []);
+
+  function addLog(message: string) {
+    setTranscript((items) => [newEntry("system", message), ...items].slice(0, 80));
+  }
+
+  function applyMode(nextMode: RickyMode) {
+    setMode(nextMode);
+    if (nextMode === "computer") {
+      setModeRequest(null);
+      setArtifactVisible(false);
+      setArtifactFullscreen(false);
+      setShowLog(false);
+      setShowTypeInput(false);
+      setShowSettings(false);
+    } else {
+      setArtifactVisible(true);
+    }
+  }
+
   async function connect() {
-    const client = new RickyRealtimeClient({
+    const current = settings || (await window.ricky.getSettings()).settings;
+    const client = createVoiceClient(current.tasks.voice.provider, {
       onConnectionState: setConnectionState,
       onMood: setMood,
       onMouthShape: setMouthShape,
@@ -37,23 +76,13 @@ export default function App() {
         setArtifactVisible(true);
         if (nextArtifact.fullscreen) setArtifactFullscreen(true);
       },
-      onMode: (nextMode) => {
-        setMode(nextMode);
-        if (nextMode === "computer") {
-          setArtifactVisible(false);
-          setArtifactFullscreen(false);
-          setShowLog(false);
-          setShowTypeInput(false);
-        } else {
-          setArtifactVisible(true);
-        }
-      },
+      onMode: applyMode,
       onStatus: (message) => {
         setStatus(message);
         setTranscript((items) => [newEntry("system", message), ...items].slice(0, 80));
       },
       onThumbnailReady: playThumbnailReadySound,
-    });
+    }, { pauseMicWhileSpeaking: current.pauseMicWhileSpeaking });
     clientRef.current = client;
     await client.connect();
   }
@@ -64,19 +93,12 @@ export default function App() {
     setStatus("Disconnected");
   }
 
+  // The only path into computer mode: a user click in this window.
   async function switchMode(nextMode: RickyMode) {
-    setMode(nextMode);
-    const result = await window.ricky.executeTool({ name: "set_mode", arguments: { mode: nextMode } });
-    if (result.artifact) setArtifact(result.artifact);
-    if (nextMode === "computer") {
-      setArtifactVisible(false);
-      setArtifactFullscreen(false);
-      setShowLog(false);
-      setShowTypeInput(false);
-    } else {
-      setArtifactVisible(true);
-    }
-    setTranscript((items) => [newEntry("system", `Mode switched to ${nextMode}.`), ...items].slice(0, 80));
+    const { mode: applied } = await window.ricky.setMode(nextMode);
+    applyMode(applied);
+    addLog(applied === "computer" ? "Computer control is ON. Click the expand button on the mini face to turn it off." : "Display mode.");
+    if (applied === "computer") clientRef.current?.sendText("[System] The user turned computer control on. Continue with their request.");
   }
 
   function sendTextPrompt() {
@@ -95,8 +117,8 @@ export default function App() {
           <button
             className="mini-restore-button"
             onClick={() => void switchMode("display")}
-            aria-label="Return to full Ricky window"
-            title="Return to full Ricky window"
+            aria-label="Turn off computer control and return to full window"
+            title="Turn off computer control"
           >
             <Expand size={14} />
           </button>
@@ -109,6 +131,25 @@ export default function App() {
     <main className="app-shell">
       <div className="window-drag-strip" aria-hidden="true" />
       <div className="window-drag-left-zone" aria-hidden="true" />
+      {showSettings ? (
+        <SettingsPanel
+          onClose={() => setShowSettings(false)}
+          onSaved={setSettings}
+          voiceConnected={isConnected}
+        />
+      ) : null}
+      {modeRequest ? (
+        <div className="mode-request" role="alertdialog" aria-label="Computer control request">
+          <MonitorCog size={16} />
+          <span>{modeRequest.startsWith("Ricky") ? modeRequest : `Ricky wants to control your computer: ${modeRequest}`}</span>
+          <button className="settings-button primary" onClick={() => void switchMode("computer")}>
+            Allow computer control
+          </button>
+          <button className="settings-button" onClick={() => setModeRequest(null)}>
+            Not now
+          </button>
+        </div>
+      ) : null}
       <section className="companion-window">
         <section className="face-stage">
           <RickyFace mood={mood} mouthShape={mouthShape} />
@@ -161,8 +202,8 @@ export default function App() {
             <button
               className="simple-button danger"
               onClick={() => void switchMode("computer")}
-              aria-label="Computer use mode"
-              title="Computer use mode"
+              aria-label="Turn on computer control"
+              title="Turn on computer control (only you can)"
             >
               <MonitorCog size={16} />
             </button>
@@ -181,6 +222,14 @@ export default function App() {
               title="Toggle live log"
             >
               <History size={16} />
+            </button>
+            <button
+              className={showSettings ? "simple-button active" : "simple-button"}
+              onClick={() => setShowSettings((value) => !value)}
+              aria-label="Settings"
+              title="Settings: models, API keys, computer control"
+            >
+              <Settings size={16} />
             </button>
           </section>
         </footer>

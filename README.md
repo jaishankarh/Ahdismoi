@@ -1,100 +1,122 @@
 # RileyJarvis
 
-RileyJarvis is a local Electron desktop AI companion with realtime voice, a visual artifact panel, image generation, web search, notes, and opt-in macOS computer control.
+A local desktop AI companion you talk to. It has realtime voice, a visual artifact panel, image and thumbnail generation, web search, notes and records, and opt-in computer control on **macOS and Linux**.
 
-It is built with Electron, React, Vite, TypeScript, and the OpenAI Realtime API.
+Built with Electron, React, Vite and TypeScript. This fork adds:
+
+- **Every model is a setting.** Voice, image generation, image editing, web search and screen understanding each have their own provider and model picker, and you can type any model ID.
+- **Gemini by default.** It works with a single Google Gemini API key. OpenAI, OpenRouter and Exa are optional alternatives.
+- **Linux support** for computer control, on both X11 and Wayland, alongside macOS.
+- **Ricky can see the screen.** Screenshots go to a vision model, which returns clickable elements with coordinates, so clicks aren't blind guesses.
+- **Only you can turn on computer control.** The assistant can ask, but you have to click to allow it.
+- **API keys are managed in the app** and encrypted with your OS keychain.
 
 ## Features
 
-- Realtime speech-to-speech conversation with OpenAI Realtime.
-- Animated companion face with listening, thinking, speaking, and working states.
-- Artifact panel for markdown, menus, notes, Mermaid diagrams, generated images, records, and progress.
-- YouTube thumbnail board with persistent numbered generations and image edits.
-- Optional Exa-powered web search.
-- Local notes and records stored at runtime under `data/`.
-- Optional computer-use mode for opening apps, clicking, typing, scrolling, screenshots, and UI inspection on macOS.
+- Realtime speech-to-speech conversation: Gemini Live (default) or OpenAI Realtime. You can interrupt at any time.
+- Animated companion face with listening, thinking, speaking and working states.
+- Artifact panel for markdown, menus, notes, Mermaid diagrams, generated images, records and progress.
+- YouTube thumbnail board with persistent numbered generations, edits and reference photos.
+- Web search with source links: Gemini + Google Search (default), OpenAI, OpenRouter or Exa.
+- Local notes and records stored under `data/`.
+- Computer control: open apps, look at the screen, click, type, keyboard shortcuts, scroll and inspect windows.
+
+## Default models
+
+| Task | Default | Alternatives in Settings |
+|---|---|---|
+| Voice | Gemini `gemini-3.8-live` (voice "Charon") | Other Gemini Live models, OpenAI `gpt-realtime-2` |
+| Image generation | Gemini `gemini-3.1-flash-image` (Nano Banana 2) | Nano Banana Pro / Lite, OpenAI `gpt-image-2`, any OpenRouter image model (FLUX.2, Qwen Image…) |
+| Image editing | Gemini `gemini-3.1-flash-image` | Same as above |
+| Web search | Gemini `gemini-3.8-flash` + Google Search | OpenAI (web_search tool), OpenRouter (web plugin), Exa |
+| Screen understanding | Gemini `gemini-3.8-flash` | Any OpenAI or OpenRouter vision model |
+
+Model IDs change often. If one stops working, pick another in **Settings → Models** and press **Check**. Check is a free lookup; it doesn't generate anything.
 
 ## Requirements
 
-- macOS
+- macOS, or Linux (X11 or Wayland)
 - Node.js 20+
-- npm
-- An OpenAI API key with Realtime and image generation access
-- Optional: an Exa API key for web search
+- A Google Gemini API key ([get one](https://aistudio.google.com/apikey)). Optional: OpenAI, OpenRouter or Exa keys if you switch providers.
 
-## Quick Start
+## Quick start
 
 ```bash
-git clone https://github.com/rileybrown/rileyjarvis.git
+git clone <your fork URL> rileyjarvis
 cd rileyjarvis
 npm install
-cp .env.example .env.local
 npm run dev
 ```
 
-Edit `.env.local` before starting voice features:
+Click the **gear icon**, paste your Gemini API key under **API keys**, then click the **mic** button and start talking.
+
+Alternatively, put keys in `.env.local` (see `.env.example`). Keys saved in the app take priority.
+
+### Linux: one-time computer-control setup
 
 ```bash
-OPENAI_API_KEY=your_openai_api_key_here
-EXA_API_KEY=your_exa_api_key_here
+npm run setup:linux
 ```
 
-`OPENAI_API_KEY` is required. `EXA_API_KEY` is optional; web search will show a setup message when it is missing.
+- **X11:** installs `xdotool` and `scrot`.
+- **Wayland** (default on recent Ubuntu/Fedora): installs `ydotool` and a screenshot tool, gives your user access to `/dev/uinput`, and runs `ydotoold` as a user service. Log out and back in afterwards.
+- On Wayland, Ricky's own window runs through XWayland so the floating mini-face can position itself and stay on top. Set `RICKY_NATIVE_WAYLAND=1` to opt out.
+- Wayland hides other windows' titles from apps, so "inspect UI" is limited. Ricky relies on screenshots instead.
 
-## macOS Permissions
+**Settings → Computer control** shows whether everything is ready and what's missing.
 
-RileyJarvis runs locally. Depending on the features you use, macOS may ask for:
+### macOS permissions
 
-- Microphone permission for voice conversation.
-- Accessibility permission for computer-control tools.
-- Screen Recording permission for screenshots and screen inspection.
+macOS may ask for:
 
-Computer-control tools are blocked until the app is in computer-use mode.
+- **Microphone**, for voice.
+- **Accessibility**, for clicking and typing (grant it to Electron, or to the terminal you launch from).
+- **Screen Recording**, for screenshots.
+
+## Using computer control
+
+1. Ask Ricky to do something on your computer. If computer control is off, an **Allow computer control** banner appears. You can also click the monitor button yourself.
+2. The window shrinks to a floating face, and Ricky can open apps, look at the screen, click, type and use shortcuts.
+3. Click the small expand button on the face to turn computer control off.
+
+Ricky asks before clicking things that send, delete, buy or change settings, and before shortcuts that close or quit. Typing and pressing Enter don't need extra approval.
+
+## Settings and data locations
+
+- Settings and encrypted keys live in Electron's user-data folder: `~/Library/Application Support/rileyjarvis` on macOS, `~/.config/rileyjarvis` on Linux.
+- On Linux, encryption uses GNOME Keyring or KWallet. If neither is running, the Settings panel warns you, and you can use `.env.local` instead.
+- Notes, records, generated images, thumbnails and recent screenshots are in `data/`. Only the last 20 screenshots are kept.
+
+## Costs (rough, check current pricing)
+
+- Gemini Live audio: about $0.005/min in and $0.018/min out, plus conversation context. Google's free tier includes the Live models, with rate limits. On the free tier, Google may use your data to improve its products.
+- Nano Banana 2: about $0.07 per 1K image. OpenRouter's FLUX.2 Klein: about $0.014.
+- Search and vision calls use small Flash models and cost fractions of a cent each.
 
 ## Development
 
 ```bash
-npm run dev
-```
-
-This starts Vite on `127.0.0.1:5173` and launches Electron.
-
-Other useful commands:
-
-```bash
+npm run dev         # Vite + Electron with hot reload
 npm run typecheck
-npm run build
-npm start
+npm run build       # production build into dist/
+npm start           # run the built app
 ```
 
-## Runtime Data
+## Project layout
 
-The app creates a local `data/` directory for notes, records, generated images, and thumbnail-board state. That directory is intentionally ignored by Git.
-
-Do not commit:
-
-- `.env.local`
-- Anything under `data/`
-- `dist/`
-- `node_modules/`
-
-## Security Notes
-
-- API keys are loaded only from local environment files.
-- `.env.local` and all `.env.*` files are ignored except `.env.example`.
-- Generated images and local database files are ignored.
-- Risky computer-control actions should require explicit confirmation.
-- Typing and pressing Enter in computer-use mode are intentionally allowed without extra confirmation because they are core voice-control actions.
-
-Before publishing a fork, run:
-
-```bash
-npm run typecheck
-npm run build
-git status --short
 ```
-
-Then verify that no local secrets or runtime data are staged.
+electron/
+  main.cjs       window, IPC, tool definitions and tool execution
+  settings.cjs   settings, model presets, encrypted API keys
+  providers.cjs  image / search / vision / model-check adapters (Gemini, OpenAI, OpenRouter, Exa)
+  voice.cjs      OpenAI Realtime token minting; Gemini Live WebSocket with auto-resume
+  computer.cjs   macOS / Linux X11 / Linux Wayland computer control backends
+src/
+  lib/voice/     Gemini Live + OpenAI Realtime clients behind one interface
+  components/    face, artifact panel, settings panel
+scripts/
+  setup-linux.sh
+```
 
 ## License
 

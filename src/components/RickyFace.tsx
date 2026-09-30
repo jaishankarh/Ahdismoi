@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import type { MouthShape, RickyMood } from "../lib/realtime";
+import type { MouthShape, RickyMood } from "../lib/voice";
 
 type RickyFaceProps = {
   mood: RickyMood;

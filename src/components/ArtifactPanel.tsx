@@ -226,7 +226,7 @@ function ThumbnailBoard({ content }: { content: string }) {
       <header className="thumbnail-board-meta">
         <div>
           <span>{page.totalImages ?? images.length} thumbnails</span>
-          <p>{(board.references || []).length} Riley reference image{(board.references || []).length === 1 ? "" : "s"} loaded</p>
+          <p>{(board.references || []).length} reference image{(board.references || []).length === 1 ? "" : "s"} loaded</p>
         </div>
         <small>Page {page.page || 1}/{page.totalPages || 1} · next #{page.nextNumber || "?"}</small>
       </header>
@@ -251,7 +251,7 @@ function ThumbnailBoard({ content }: { content: string }) {
         </div>
       ) : (
         <div className="thumbnail-empty">
-          <p>Riley reference image loaded. Ask Ricky: “Generate a 16:9 thumbnail of me about Cursor agents.”</p>
+          <p>Reference image loaded. Ask Ricky: “Generate a 16:9 thumbnail of me about Cursor agents.”</p>
         </div>
       )}
     </section>
