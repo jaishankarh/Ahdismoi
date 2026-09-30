@@ -55,12 +55,19 @@ export type WakeSettings = {
   porcupineKeywordName: string;
 };
 
+export type AudioPrefs = {
+  /** Empty follows the system default. A device id is used only after the user picks one. */
+  inputId: string;
+  outputId: string;
+};
+
 export type RickySettings = {
   userName: string;
   assistantName: string;
   wake: WakeSettings;
   tasks: Record<TaskId, TaskSetting>;
   pauseMicWhileSpeaking: boolean;
+  audio: AudioPrefs;
 };
 
 export type SettingsBundle = {
@@ -91,11 +98,16 @@ declare global {
       onGeminiClosed: (callback: (info: { code: number; reason: string }) => void) => () => void;
       onGeminiStatus: (callback: (info: { message: string }) => void) => () => void;
       setMode: (mode: "display" | "computer") => Promise<{ mode: "display" | "computer" }>;
+      dismissModeRequest: () => Promise<boolean>;
       onModeChanged: (callback: (mode: "display" | "computer") => void) => () => void;
       onModeRequest: (callback: (info: { reason: string }) => void) => () => void;
       getSettings: () => Promise<SettingsBundle>;
       saveSettings: (
-        partial: Partial<Omit<RickySettings, "tasks" | "wake">> & { tasks?: Partial<Record<TaskId, Partial<TaskSetting>>>; wake?: Partial<WakeSettings> },
+        partial: Partial<Omit<RickySettings, "tasks" | "wake" | "audio">> & {
+          tasks?: Partial<Record<TaskId, Partial<TaskSetting>>>;
+          wake?: Partial<WakeSettings>;
+          audio?: Partial<AudioPrefs>;
+        },
       ) => Promise<RickySettings>;
       resetSettings: () => Promise<RickySettings>;
       setApiKey: (provider: ProviderId, value: string) => Promise<SettingsBundle["keys"]>;

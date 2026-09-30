@@ -3,6 +3,8 @@
 // subscribe, so handing off from "wake word heard" to "talking to the model" loses no audio.
 // Each frame carries its absolute sample index so a ring buffer can replay exact ranges.
 
+import { currentRoute, onInputRoute, openInput } from "./devices";
+
 export const MIC_RATE = 16000;
 export const FRAME_SAMPLES = 512;
 
@@ -29,9 +31,13 @@ class MicCapture {
   private frameLength = 0;
   private carry = 0;
   private sampleIndex = 0;
+  private generation = 0;
+  private inputId = "";
+  private routeWatch: (() => void) | null = null;
 
   /** Subscribe to frames; starts the mic on first subscriber. Returns an unsubscribe function. */
   async subscribe(listener: Listener): Promise<() => void> {
+    this.watchRoute();
     this.listeners.add(listener);
     try {
       await this.ensureStarted();
@@ -50,36 +56,68 @@ class MicCapture {
     return this.sampleIndex;
   }
 
+  private watchRoute(): void {
+    if (this.routeWatch) return;
+    this.routeWatch = onInputRoute(() => {
+      if (this.listeners.size === 0) return;
+      void this.restart();
+    });
+  }
+
+  private async restart(): Promise<void> {
+    this.release();
+    this.starting = null;
+    if (this.listeners.size === 0) return;
+    await this.ensureStarted();
+  }
+
   private ensureStarted(): Promise<void> {
     if (this.context) return Promise.resolve();
     if (!this.starting) {
-      this.starting = this.start().finally(() => {
-        this.starting = null;
+      const run = this.start().finally(() => {
+        if (this.starting === run) this.starting = null;
       });
+      this.starting = run;
     }
     return this.starting;
   }
 
   private async start(): Promise<void> {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-    });
+    const generation = this.generation;
+    const deviceId = currentRoute().inputId;
+    const stream = await openInput(deviceId);
+    if (generation !== this.generation || this.listeners.size === 0) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
     const context = new AudioContext();
     const moduleUrl = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: "application/javascript" }));
     await context.audioWorklet.addModule(moduleUrl);
     URL.revokeObjectURL(moduleUrl);
+    if (generation !== this.generation || this.listeners.size === 0) {
+      stream.getTracks().forEach((track) => track.stop());
+      void context.close();
+      return;
+    }
     const source = context.createMediaStreamSource(stream);
     const worklet = new AudioWorkletNode(context, "ricky-capture");
     const sink = context.createGain();
     sink.gain.value = 0; // keeps the graph running without echoing the mic
     source.connect(worklet).connect(sink).connect(context.destination);
     const ratio = context.sampleRate / MIC_RATE;
-    worklet.port.onmessage = (event: MessageEvent<Float32Array>) => this.push(event.data, ratio);
+    worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
+      if (generation !== this.generation) return;
+      this.push(event.data, ratio);
+    };
     if (context.state === "suspended") await context.resume();
+    if (generation !== this.generation || this.listeners.size === 0) {
+      stream.getTracks().forEach((track) => track.stop());
+      void context.close();
+      return;
+    }
     this.stream = stream;
     this.context = context;
-    // If everyone unsubscribed while we were starting, shut down again.
-    if (this.listeners.size === 0) this.stop();
+    this.inputId = deviceId;
   }
 
   private push(input: Float32Array, ratio: number): void {
@@ -103,13 +141,19 @@ class MicCapture {
     this.carry = position - input.length;
   }
 
-  private stop(): void {
+  private release(): void {
+    this.generation += 1;
     this.stream?.getTracks().forEach((track) => track.stop());
     void this.context?.close();
     this.stream = null;
     this.context = null;
+    this.inputId = "";
     this.frameLength = 0;
     this.carry = 0;
+  }
+
+  private stop(): void {
+    this.release();
   }
 }
 

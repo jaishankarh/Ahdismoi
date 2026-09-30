@@ -3,7 +3,8 @@ import { BrainCircuit, Ear, EarOff, Expand, History, Keyboard, Mic, MicOff, Moni
 import { ArtifactPanel } from "./components/ArtifactPanel";
 import { RickyFace } from "./components/RickyFace";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { createVoiceClient, newEntry, type MouthShape, type RickyConnectionState, type RickyMood, type TranscriptEntry, type VoiceClient } from "./lib/voice";
+import { applyAudioPrefs, useOutput } from "./lib/audio/devices";
+import { cleanError, createVoiceClient, newEntry, type MouthShape, type RickyConnectionState, type RickyMood, type TranscriptEntry, type VoiceClient } from "./lib/voice";
 import { WakeController, type WakeState } from "./lib/wake/controller";
 import type { RickyArtifact, RickySettings } from "./vite-env";
 
@@ -31,6 +32,7 @@ export default function App() {
   const [wakeNotice, setWakeNotice] = useState("");
   const [platform, setPlatform] = useState("");
   const clientRef = useRef<VoiceClient | null>(null);
+  const sendingTextRef = useRef(false);
   const settingsRef = useRef<RickySettings | null>(null);
   const wakeRef = useRef<WakeController | null>(null);
 
@@ -52,10 +54,11 @@ export default function App() {
   }
 
   useEffect(() => {
-    void window.ricky.getSettings().then((bundle) => {
+    void window.ricky.getSettings().then(async (bundle) => {
       setSettings(bundle.settings);
       setPlatform(bundle.platform);
       settingsRef.current = bundle.settings;
+      await applyAudioPrefs(bundle.settings.audio);
       if (bundle.settings.wake.enabled) void startWake(bundle.settings);
       const voiceProvider = bundle.settings.tasks.voice.provider;
       if (!bundle.keys[voiceProvider]?.set) {
@@ -170,6 +173,7 @@ export default function App() {
     const wakeChanged = previous && JSON.stringify({ ...previous.wake, enabled: 0 }) !== JSON.stringify({ ...next.wake, enabled: 0 });
     const voiceChanged = previous && JSON.stringify(previous.tasks.voice) !== JSON.stringify(next.tasks.voice);
     if (voiceChanged && !clientRef.current?.isConnected()) clientRef.current = null;
+    await applyAudioPrefs(next.audio);
     if (wakeChanged && wakeOn) await startWake(next);
   }
 
@@ -196,12 +200,34 @@ export default function App() {
     if (applied === "computer") clientRef.current?.sendText("[System] The user turned computer control on. Continue with their request.");
   }
 
-  function sendTextPrompt() {
+  async function ensureVoiceClient(): Promise<VoiceClient | null> {
+    const wake = wakeRef.current;
+    if (wake?.current === "asleep") await wake.wake();
+    const client = clientRef.current || createClient();
+    if (!client.isConnected()) await client.connect();
+    return client.isConnected() ? client : null;
+  }
+
+  async function sendTextPrompt() {
     const trimmed = textPrompt.trim();
-    if (!trimmed) return;
-    clientRef.current?.sendText(trimmed);
+    if (!trimmed || sendingTextRef.current) return;
+    sendingTextRef.current = true;
     setTextPrompt("");
-    setShowTypeInput(false);
+    setTranscript((items) => [newEntry("user", trimmed), ...items].slice(0, 80));
+    setStatus("Sending your message…");
+    try {
+      const client = await ensureVoiceClient();
+      if (!client) return;
+      client.sendText(trimmed, { silent: true });
+      setStatus("Sent. Waiting for a reply…");
+      setShowTypeInput(false);
+    } catch (error) {
+      const message = cleanError(error);
+      setStatus(message);
+      addLog(message);
+    } finally {
+      sendingTextRef.current = false;
+    }
   }
 
   if (mode === "computer") {
@@ -230,6 +256,7 @@ export default function App() {
         <SettingsPanel
           onClose={() => setShowSettings(false)}
           onSaved={(next) => void onSettingsSaved(next)}
+          onAudioPreview={(audio) => void applyAudioPrefs(audio)}
           voiceConnected={isConnected}
         />
       ) : null}
@@ -240,7 +267,13 @@ export default function App() {
           <button className="settings-button primary" onClick={() => void switchMode("computer")}>
             Allow computer control
           </button>
-          <button className="settings-button" onClick={() => setModeRequest(null)}>
+          <button
+            className="settings-button"
+            onClick={() => {
+              setModeRequest(null);
+              void window.ricky.dismissModeRequest();
+            }}
+          >
             Not now
           </button>
         </div>
@@ -252,18 +285,22 @@ export default function App() {
         </section>
 
         <footer className="bottom-console">
+          {status && status !== "Idle" ? <p className="console-status">{status}</p> : null}
           {showTypeInput ? (
             <section className="prompt-box">
               <input
                 value={textPrompt}
                 onChange={(event) => setTextPrompt(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") sendTextPrompt();
+                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    void sendTextPrompt();
+                  }
                 }}
                 autoFocus
-                placeholder={`Type to ${assistantName}...`}
+                placeholder={`Type to ${assistantName} and press Enter`}
               />
-              <button onClick={sendTextPrompt} aria-label="Send typed prompt" title="Send typed prompt">
+              <button onClick={() => void sendTextPrompt()} aria-label="Send typed prompt" title="Send typed prompt">
                 <Send size={15} />
               </button>
             </section>
@@ -292,7 +329,7 @@ export default function App() {
               className={showTypeInput ? "simple-button active" : "simple-button"}
               onClick={() => setShowTypeInput((value) => !value)}
               aria-label={`Type to ${assistantName}`}
-              title={`Type to ${assistantName}`}
+              title={`Type to ${assistantName}. Press Enter to send. Connects automatically.`}
             >
               <Keyboard size={16} />
             </button>
@@ -333,7 +370,7 @@ export default function App() {
               className={showSettings ? "simple-button active" : "simple-button"}
               onClick={() => setShowSettings((value) => !value)}
               aria-label="Settings"
-              title="Settings: models, API keys, computer control"
+              title="Settings: audio, models, API keys, computer control"
             >
               <Settings size={16} />
             </button>
@@ -373,25 +410,27 @@ export default function App() {
 }
 
 function playThumbnailReadySound() {
-  try {
-    const AudioContextClass = window.AudioContext;
-    const audio = new AudioContextClass();
-    const gain = audio.createGain();
-    const osc = audio.createOscillator();
+  void (async () => {
+    try {
+      const audio = new AudioContext();
+      await useOutput(audio);
+      const gain = audio.createGain();
+      const osc = audio.createOscillator();
 
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(880, audio.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(1320, audio.currentTime + 0.08);
-    gain.gain.setValueAtTime(0.0001, audio.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.035, audio.currentTime + 0.015);
-    gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.13);
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, audio.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1320, audio.currentTime + 0.08);
+      gain.gain.setValueAtTime(0.0001, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.035, audio.currentTime + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.13);
 
-    osc.connect(gain);
-    gain.connect(audio.destination);
-    osc.start();
-    osc.stop(audio.currentTime + 0.14);
-    window.setTimeout(() => void audio.close(), 220);
-  } catch {
-    // Audio cues are optional; ignore browsers that block short sounds.
-  }
+      osc.connect(gain);
+      gain.connect(audio.destination);
+      osc.start();
+      osc.stop(audio.currentTime + 0.14);
+      window.setTimeout(() => void audio.close(), 220);
+    } catch {
+      // Audio cues are optional; ignore browsers that block short sounds.
+    }
+  })();
 }

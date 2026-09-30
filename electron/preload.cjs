@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld("ricky", {
 
   // Mode (only user clicks call setMode)
   setMode: (mode) => ipcRenderer.invoke("mode:set", mode),
+  dismissModeRequest: () => ipcRenderer.invoke("mode:dismiss-request"),
   onModeChanged: (callback) => subscribe("mode:changed", callback),
   onModeRequest: (callback) => subscribe("mode:request", callback),
 

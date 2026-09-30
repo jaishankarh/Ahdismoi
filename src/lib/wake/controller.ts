@@ -4,6 +4,7 @@
 // go_to_sleep (e.g. after "that's all" / "merci").
 
 import type { WakeSettings } from "../../vite-env";
+import { useOutput } from "../audio/devices";
 import type { RickyMood, VoiceClient } from "../voice";
 import { WakeListener, type WakeDetection, type WakeProgress } from "./listener";
 
@@ -155,22 +156,25 @@ function describeProgress(progress: WakeProgress): string {
 }
 
 function playChime(kind: "wake" | "sleep"): void {
-  try {
-    const audio = new AudioContext();
-    const gain = audio.createGain();
-    const osc = audio.createOscillator();
-    const [from, to] = kind === "wake" ? [660, 990] : [880, 520];
-    osc.type = "sine";
-    osc.frequency.setValueAtTime(from, audio.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(to, audio.currentTime + 0.12);
-    gain.gain.setValueAtTime(0.0001, audio.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.05, audio.currentTime + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.2);
-    osc.connect(gain).connect(audio.destination);
-    osc.start();
-    osc.stop(audio.currentTime + 0.22);
-    window.setTimeout(() => void audio.close(), 320);
-  } catch {
-    // sounds are optional
-  }
+  void (async () => {
+    try {
+      const audio = new AudioContext();
+      await useOutput(audio);
+      const gain = audio.createGain();
+      const osc = audio.createOscillator();
+      const [from, to] = kind === "wake" ? [660, 990] : [880, 520];
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(from, audio.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(to, audio.currentTime + 0.12);
+      gain.gain.setValueAtTime(0.0001, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.05, audio.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.2);
+      osc.connect(gain).connect(audio.destination);
+      osc.start();
+      osc.stop(audio.currentTime + 0.22);
+      window.setTimeout(() => void audio.close(), 320);
+    } catch {
+      // sounds are optional
+    }
+  })();
 }

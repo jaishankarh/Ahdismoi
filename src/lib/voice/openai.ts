@@ -1,5 +1,6 @@
 // OpenAI Realtime over WebRTC (the original RileyJarvis transport), now using the model and voice from Settings.
 import type { RickyToolSpec } from "../../vite-env";
+import { currentRoute, onInputRoute, openInput, watchOutput } from "../audio/devices";
 import { cleanError, MouthMeter, newEntry, parseJsonObject, runToolCalls, sanitizeToolResult, type VoiceCallbacks, type VoiceClient } from "./common";
 
 type ServerEvent = {
@@ -26,6 +27,10 @@ export class OpenAIRealtimeClient implements VoiceClient {
   private dc: RTCDataChannel | null = null;
   private micStream: MediaStream | null = null;
   private audioContext: AudioContext | null = null;
+  private output: HTMLAudioElement | null = null;
+  private unwatchOutput: (() => void) | null = null;
+  private unwatchInput: (() => void) | null = null;
+  private micEnabled = true;
   private currentAssistantText = "";
   private toolSpecs: RickyToolSpec[] = [];
   private toolRunning = false;
@@ -48,6 +53,8 @@ export class OpenAIRealtimeClient implements VoiceClient {
       const pc = new RTCPeerConnection();
       const audio = document.createElement("audio");
       audio.autoplay = true;
+      this.output = audio;
+      this.unwatchOutput = watchOutput(audio);
 
       pc.ontrack = (event) => {
         audio.srcObject = event.streams[0];
@@ -58,10 +65,12 @@ export class OpenAIRealtimeClient implements VoiceClient {
         this.meter.start(analyser);
       };
 
-      this.micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      this.micStream = await openInput(currentRoute().inputId);
+      this.micStream.getAudioTracks().forEach((track) => {
+        track.enabled = this.micEnabled;
       });
       pc.addTrack(this.micStream.getAudioTracks()[0], this.micStream);
+      this.unwatchInput = onInputRoute(() => void this.retargetInput());
 
       const dc = pc.createDataChannel("oai-events");
       dc.addEventListener("open", () => {
@@ -92,12 +101,17 @@ export class OpenAIRealtimeClient implements VoiceClient {
   }
 
   disconnect(resetState = true): void {
+    this.unwatchInput?.();
+    this.unwatchInput = null;
+    this.unwatchOutput?.();
+    this.unwatchOutput = null;
     this.dc?.close();
     this.pc?.close();
     this.micStream?.getTracks().forEach((track) => track.stop());
     this.meter.stop();
     void this.audioContext?.close();
     this.audioContext = null;
+    this.output = null;
     this.dc = null;
     this.pc = null;
     this.micStream = null;
@@ -114,21 +128,41 @@ export class OpenAIRealtimeClient implements VoiceClient {
 
   setMicEnabled(enabled: boolean): void {
     // A disabled WebRTC track sends silence.
+    this.micEnabled = enabled;
     this.micStream?.getAudioTracks().forEach((track) => {
       track.enabled = enabled;
     });
+  }
+
+  private async retargetInput(): Promise<void> {
+    if (!this.pc || !this.micStream) return;
+    try {
+      const stream = await openInput(currentRoute().inputId);
+      const track = stream.getAudioTracks()[0];
+      if (!track || !this.pc) {
+        stream.getTracks().forEach((item) => item.stop());
+        return;
+      }
+      track.enabled = this.micEnabled;
+      const sender = this.pc.getSenders().find((item) => item.track?.kind === "audio");
+      if (sender) await sender.replaceTrack(track);
+      this.micStream.getTracks().forEach((item) => item.stop());
+      this.micStream = stream;
+    } catch (error) {
+      this.callbacks.onStatus(cleanError(error));
+    }
   }
 
   injectAudio(_samples: Int16Array): void {
     // WebRTC streams live audio only; nothing to replay.
   }
 
-  sendText(text: string): void {
+  sendText(text: string, options?: { silent?: boolean }): void {
     if (!this.dc || this.dc.readyState !== "open") {
-      this.callbacks.onStatus("Connect voice before sending a text prompt.");
+      this.callbacks.onStatus("That message was not sent. The voice connection is not open.");
       return;
     }
-    this.callbacks.onTranscript(newEntry("user", text));
+    if (!options?.silent) this.callbacks.onTranscript(newEntry("user", text));
     this.sendEvent({ type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text }] } });
     this.sendEvent({ type: "response.create" });
   }

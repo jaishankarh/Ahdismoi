@@ -2,6 +2,7 @@
 // reaches this page); this class captures the mic as 16 kHz PCM, plays back Gemini's 24 kHz PCM,
 // handles interruptions, transcripts, and tool calls.
 import type { RickyToolSpec } from "../../vite-env";
+import { watchOutput } from "../audio/devices";
 import { mic, MIC_RATE, type MicFrame } from "../audio/mic";
 import { cleanError, MouthMeter, newEntry, runToolCalls, sanitizeToolResult, type VoiceCallbacks, type VoiceClient, type VoiceOptions } from "./common";
 
@@ -33,6 +34,7 @@ export class GeminiLiveClient implements VoiceClient {
   private micEnabled = true;
   private outputContext: AudioContext | null = null;
   private outputGain: GainNode | null = null;
+  private unwatchOutput: (() => void) | null = null;
   private playing = new Set<AudioBufferSourceNode>();
   private nextPlayTime = 0;
   private pending = new Int16Array(CHUNK_SAMPLES);
@@ -89,13 +91,19 @@ export class GeminiLiveClient implements VoiceClient {
     this.callbacks.onMood("idle");
   }
 
-  sendText(text: string): void {
+  sendText(text: string, options?: { silent?: boolean }): void {
     if (!this.connected) {
-      this.callbacks.onStatus("Connect voice before sending a text prompt.");
+      this.callbacks.onStatus("That message was not sent. The voice connection is not open.");
       return;
     }
-    this.callbacks.onTranscript(newEntry("user", text));
-    window.ricky.sendGemini({ realtimeInput: { text } });
+    if (!options?.silent) this.callbacks.onTranscript(newEntry("user", text));
+    // A finished client turn. realtimeInput text waits for speech detection and never replies on its own.
+    window.ricky.sendGemini({
+      clientContent: {
+        turns: [{ role: "user", parts: [{ text }] }],
+        turnComplete: true,
+      },
+    });
   }
 
   private teardown(): void {
@@ -108,6 +116,8 @@ export class GeminiLiveClient implements VoiceClient {
     this.micUnsubscribe = null;
     this.stopPlayback();
     this.meter.stop();
+    this.unwatchOutput?.();
+    this.unwatchOutput = null;
     void this.outputContext?.close();
     this.outputContext = null;
     this.outputGain = null;
@@ -169,6 +179,7 @@ export class GeminiLiveClient implements VoiceClient {
     gain.connect(analyser).connect(context.destination);
     this.outputContext = context;
     this.outputGain = gain;
+    this.unwatchOutput = watchOutput(context);
     this.nextPlayTime = 0;
     this.meter.start(analyser);
     if (context.state === "suspended") await context.resume();

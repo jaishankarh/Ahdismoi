@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, CircleAlert, ExternalLink, KeyRound, LoaderCircle, X } from "lucide-react";
+import { AudioSettings } from "./AudioSettings";
 import { cleanError } from "../lib/voice";
-import type { ComputerStatus, ProviderId, RickySettings, SettingsBundle, TaskId, WakeSettings } from "../vite-env";
+import type { AudioPrefs, ComputerStatus, ProviderId, RickySettings, SettingsBundle, TaskId, WakeSettings } from "../vite-env";
 
 type Props = {
   onClose: () => void;
   onSaved: (settings: RickySettings) => void;
+  onAudioPreview: (audio: AudioPrefs) => void;
   voiceConnected: boolean;
 };
 
@@ -13,7 +15,7 @@ type CheckState = { state: "idle" | "checking" | "ok" | "error"; message?: strin
 
 const TASK_ORDER: TaskId[] = ["voice", "imageGenerate", "imageEdit", "search", "vision"];
 
-export function SettingsPanel({ onClose, onSaved, voiceConnected }: Props) {
+export function SettingsPanel({ onClose, onSaved, onAudioPreview, voiceConnected }: Props) {
   const [bundle, setBundle] = useState<SettingsBundle | null>(null);
   const [draft, setDraft] = useState<RickySettings | null>(null);
   const [keyInputs, setKeyInputs] = useState<Partial<Record<ProviderId, string>>>({});
@@ -45,6 +47,22 @@ export function SettingsPanel({ onClose, onSaved, voiceConnected }: Props) {
 
   const neededProviders = new Set<ProviderId>(TASK_ORDER.map((task) => draft.tasks[task].provider));
   if (draft.wake.engine === "porcupine") neededProviders.add("picovoice");
+
+  const savedSettings = bundle.settings;
+  const draftSettings = draft;
+
+  function close() {
+    const savedAudio = savedSettings.audio ?? { inputId: "", outputId: "" };
+    const draftAudio = draftSettings.audio ?? { inputId: "", outputId: "" };
+    if (draftAudio.inputId !== savedAudio.inputId || draftAudio.outputId !== savedAudio.outputId) onAudioPreview(savedAudio);
+    onClose();
+  }
+
+  function updateAudio(audio: AudioPrefs) {
+    setDraft((current) => (current ? { ...current, audio } : current));
+    onAudioPreview(audio);
+    setSavedNote("");
+  }
 
   function updateWake(patch: Partial<WakeSettings>) {
     setDraft((current) => (current ? { ...current, wake: { ...current.wake, ...patch } } : current));
@@ -112,16 +130,17 @@ export function SettingsPanel({ onClose, onSaved, voiceConnected }: Props) {
   }
 
   return (
-    <div className="settings-overlay" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div className="settings-overlay" onMouseDown={(event) => event.target === event.currentTarget && close()}>
       <section className="settings-panel" role="dialog" aria-label="Settings">
         <header className="settings-header">
           <h2>Settings</h2>
-          <button className="simple-button" onClick={onClose} aria-label="Close settings" title="Close">
+          <button className="simple-button" onClick={close} aria-label="Close settings" title="Close">
             <X size={15} />
           </button>
         </header>
 
         <div className="settings-body">
+          <AudioSettings audio={draft.audio ?? { inputId: "", outputId: "" }} onChange={updateAudio} />
           <section className="settings-section">
             <h3>Models</h3>
             <p className="settings-hint">Pick a provider and model for each job. Type any model ID; the list only shows suggestions.</p>
@@ -358,7 +377,7 @@ export function SettingsPanel({ onClose, onSaved, voiceConnected }: Props) {
             Reset to defaults
           </button>
           <span className="settings-muted">{savedNote}</span>
-          <button className="settings-button" onClick={onClose}>
+          <button className="settings-button" onClick={close}>
             Close
           </button>
           <button className="settings-button primary" onClick={() => void save()} disabled={!dirty || saving}>

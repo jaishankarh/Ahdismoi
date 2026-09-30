@@ -123,6 +123,7 @@ function defaultSettings() {
       vision: envTask("VISION", "vision", { provider: "gemini", model: "gemini-3.8-flash" }),
     },
     pauseMicWhileSpeaking: envBool("PAUSE_MIC_WHILE_SPEAKING", false),
+    audio: { inputId: "", outputId: "" },
   };
 }
 
@@ -187,7 +188,17 @@ function normalizeSettings(raw) {
   wake.porcupineKeywordName = String(wake.porcupineKeywordName || "");
   next.wake = wake;
   next.pauseMicWhileSpeaking = next.pauseMicWhileSpeaking === true;
+  const audio = { ...base.audio, ...(raw?.audio && typeof raw.audio === "object" ? raw.audio : {}) };
+  audio.inputId = cleanDeviceId(audio.inputId);
+  audio.outputId = cleanDeviceId(audio.outputId);
+  next.audio = audio;
   return next;
+}
+
+function cleanDeviceId(value) {
+  const id = String(value || "").trim();
+  if (!id || id === "default" || id === "communications") return "";
+  return id.slice(0, 256);
 }
 
 async function getSettings() {
@@ -209,6 +220,7 @@ async function saveSettings(partial) {
     ...partial,
     tasks: { ...current.tasks },
     wake: { ...current.wake, ...(partial?.wake || {}) },
+    audio: { ...current.audio, ...(partial?.audio || {}) },
   };
   for (const [task, value] of Object.entries(partial?.tasks || {})) {
     merged.tasks[task] = { ...current.tasks[task], ...value };

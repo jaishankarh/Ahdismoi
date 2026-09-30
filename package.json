@@ -6,7 +6,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:127.0.0.1:5173 && node scripts/electron-dev.cjs\"",
-    "start": "electron .",
+    "start": "node scripts/electron-dev.cjs --built",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "setup:linux": "bash scripts/setup-linux.sh"

@@ -26,6 +26,7 @@ if (computer.detectPlatform() === "wayland" && !(process.env.AHDISMOI_NATIVE_WAY
 const dataDir = path.join(process.cwd(), "data");
 const dbPath = path.join(dataDir, "ricky-db.json");
 let currentMode = "display";
+let computerApprovalPending = false;
 let mainWindow = null;
 let normalWindowBounds = null;
 let dbWriteQueue = Promise.resolve();
@@ -48,11 +49,13 @@ Concise, calm, useful. Talk like a smart operator, not a chatbot.
 
 # Modes
 - Display mode is the default. Use the app and artifact panel to show things. Do not control the computer.
-- Computer use mode allows desktop control tools. Only the user can turn it on, with the toggle in the app. If they ask you to control the computer while in display mode, call set_mode with mode "computer": that shows them a button to approve. Then wait for them to confirm before using computer tools.
+- Opening a website does not need computer control. Call open_url. "Open Google" is https://www.google.com. "Search Google for cats" is https://www.google.com/search?q=cats. Never call set_mode for this.
+- Computer use mode is only for clicking, typing, and driving other apps on the desktop. Only the user can turn it on. Call set_mode with mode "computer" once, then wait. If an Allow button is already showing, do not call set_mode again and do not ask again.
 
 # Computer Use
 - Before clicking, call screen_snapshot (optionally with a question like "where is the search box?"). It returns a summary and a list of on-screen elements with click coordinates. Click using those coordinates, then take another snapshot to confirm the result.
 - Prefer keyboard shortcuts (computer_hotkey) and typing over clicking when they are reliable.
+- Do not use computer tools to open a website. Use open_url.
 
 # Tool Behavior
 - Use read-only tools when the user's intent is clear.
@@ -78,7 +81,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "set_mode",
-    description: "Switch to display mode, or ask the user to enable computer use mode. Only the user can actually turn computer mode on; calling this with mode computer shows them an approve button.",
+    description: "Ask the user to allow desktop control, or switch back to display mode. Do not use this to open a website; use open_url. Call mode computer at most once, then wait for the user. If the Allow button is already showing, do not call this again.",
     parameters: {
       type: "object",
       properties: {
@@ -122,6 +125,19 @@ const toolSpecs = [
     parameters: {
       type: "object",
       properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "open_url",
+    description: "Open a website in the user's default browser. Use this for 'open Google', 'go to youtube.com', or 'search the web in the browser'. Does not need computer control. Pass a full https URL.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+      },
+      required: ["url"],
       additionalProperties: false,
     },
   },
@@ -510,7 +526,7 @@ function requireComputerMode() {
     return {
       ok: false,
       needsMode: "computer",
-      message: "Computer control is off. Call set_mode with mode computer so the user can approve it with the toggle.",
+      message: "Computer control is off. If the user asked to open a website, call open_url instead. Otherwise call set_mode once with mode computer and wait. Do not call set_mode again while the Allow button is showing.",
     };
   }
   return null;
@@ -543,7 +559,7 @@ async function createWindow() {
   mainWindow = win;
 
   win.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(permission === "media");
+    callback(permission === "media" || permission === "speaker-selection");
   });
 
   // Links (e.g. "Get key", search sources) open in the default browser, never inside the app.
@@ -612,6 +628,7 @@ function sendToRenderer(channel, payload) {
 
 function setMode(mode) {
   currentMode = mode === "computer" ? "computer" : "display";
+  if (currentMode === "computer") computerApprovalPending = false;
   setWindowMode(currentMode);
   sendToRenderer("mode:changed", currentMode);
   return currentMode;
@@ -624,7 +641,14 @@ async function sessionInstructions() {
 }
 
 // Only the renderer's own UI (a user click) can switch into computer mode.
-ipcMain.handle("mode:set", (_event, mode) => ({ mode: setMode(mode === "computer" && !computer.backend().typeText ? "display" : mode) }));
+ipcMain.handle("mode:set", (_event, mode) => {
+  computerApprovalPending = false;
+  return { mode: setMode(mode === "computer" && !computer.backend().typeText ? "display" : mode) };
+});
+ipcMain.handle("mode:dismiss-request", () => {
+  computerApprovalPending = false;
+  return true;
+});
 ipcMain.handle("mode:get", () => currentMode);
 
 ipcMain.handle("voice:start", async () => {
@@ -705,11 +729,19 @@ ipcMain.handle("tools:execute", async (_event, toolCall) => {
         return { ok: false, error: `Computer control isn't available on ${process.platform === "win32" ? "Windows" : process.platform} yet (macOS and Linux only). Tell the user.` };
       }
       if (args.mode === "computer" && currentMode !== "computer") {
+        if (computerApprovalPending) {
+          return {
+            ok: false,
+            needsUserApproval: true,
+            message: "The Allow computer control button is already on screen. Do not call set_mode again and do not ask the user again. Wait for them to click Allow or Not now.",
+          };
+        }
+        computerApprovalPending = true;
         sendToRenderer("mode:request", { reason: String(args.reason || "") });
         return {
           ok: false,
           needsUserApproval: true,
-          message: "Only the user can turn on computer control. An 'Allow computer control' button is now showing in the app; ask them to click it, then continue.",
+          message: "Only the user can turn on computer control. An Allow button is now showing. Ask once, then wait. Do not call set_mode again.",
         };
       }
       const mode = setMode(args.mode === "computer" ? "computer" : "display");
@@ -737,6 +769,10 @@ ipcMain.handle("tools:execute", async (_event, toolCall) => {
           content: buildMenuMarkdown((await settingsStore.getSettings()).assistantName),
         },
       };
+    }
+
+    if (name === "open_url") {
+      return await openUrl(args);
     }
 
     if (name === "web_search") {
@@ -993,6 +1029,33 @@ async function pruneScreenshots() {
   }
 }
 
+function toBrowserUrl(raw) {
+  const text = String(raw || "").trim();
+  if (!text) throw new Error("No address to open.");
+  if (/^https?:\/\//i.test(text)) return text;
+  const sites = {
+    google: "https://www.google.com",
+    youtube: "https://www.youtube.com",
+    gmail: "https://mail.google.com",
+    github: "https://github.com",
+    maps: "https://maps.google.com",
+  };
+  const key = text.toLowerCase().replace(/^www\./, "").replace(/\/$/, "");
+  if (sites[key]) return sites[key];
+  if (/^[\w.-]+\.[a-z]{2,}([/:?#].*)?$/i.test(text)) return `https://${text}`;
+  return `https://www.google.com/search?q=${encodeURIComponent(text)}`;
+}
+
+async function openUrl(args) {
+  try {
+    const url = toBrowserUrl(args.url);
+    await shell.openExternal(url);
+    return { ok: true, url, message: `Opened ${url} in the default browser.` };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 async function webSearch(args) {
   const query = String(args.query || "");
   try {
@@ -1102,7 +1165,8 @@ Here is what you can ask me to do.
 - "Search the web for the latest AI video tools."
 - "Create a chart of my workflow."
 - "Add a note: follow up on the sponsor."
-- "Open my browser and search for ..." (after enabling computer control)`;
+- "Open Google."
+- "Open my browser and search for ..." (opens in the normal browser, no computer control)`;
 }
 
 const SIZE_TO_SHAPE = { "1024x1024": "square", "1024x1536": "portrait", "1536x1024": "landscape" };

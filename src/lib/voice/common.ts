@@ -35,7 +35,8 @@ export type VoiceOptions = { pauseMicWhileSpeaking: boolean };
 export interface VoiceClient {
   connect(): Promise<void>;
   disconnect(): void;
-  sendText(text: string): void;
+  /** Send a completed text turn. Pass silent when the UI already showed the user's line. */
+  sendText(text: string, options?: { silent?: boolean }): void;
   isConnected(): boolean;
   /** Wake-word mode gates the mic while "asleep". */
   setMicEnabled(enabled: boolean): void;
