@@ -1,7 +1,7 @@
 import type { RickyArtifact, RickyToolCall, RickyToolResult, RickyToolSpec } from "../../vite-env";
 
 export type RickyConnectionState = "idle" | "connecting" | "connected" | "error";
-export type RickyMood = "idle" | "listening" | "thinking" | "speaking" | "working" | "error";
+export type RickyMood = "idle" | "listening" | "thinking" | "speaking" | "working" | "error" | "sleeping";
 
 export type MouthShape = {
   open: number;
@@ -26,6 +26,8 @@ export type VoiceCallbacks = {
   onMode: (mode: "display" | "computer") => void;
   onStatus: (message: string) => void;
   onThumbnailReady: () => void;
+  /** The model asked to end the conversation (wake-word mode). */
+  onSleepRequested?: () => void;
 };
 
 export type VoiceOptions = { pauseMicWhileSpeaking: boolean };
@@ -34,6 +36,11 @@ export interface VoiceClient {
   connect(): Promise<void>;
   disconnect(): void;
   sendText(text: string): void;
+  isConnected(): boolean;
+  /** Wake-word mode gates the mic while "asleep". */
+  setMicEnabled(enabled: boolean): void;
+  /** Replay audio captured before the session was listening (Gemini only; no-op elsewhere). */
+  injectAudio(samples: Int16Array): void;
 }
 
 export type PendingCall = { id: string; name: string; args: Record<string, unknown> };
@@ -77,6 +84,7 @@ export async function runToolCalls(calls: PendingCall[], toolSpecs: RickyToolSpe
     if (result.mode === "display" || result.mode === "computer") callbacks.onMode(result.mode);
     if (result.artifact) callbacks.onArtifact(result.artifact);
     if (result.thumbnailReady === true) callbacks.onThumbnailReady();
+    if (result.sleep === true) callbacks.onSleepRequested?.();
     if (!result.ok && typeof result.error === "string") callbacks.onTranscript(newEntry("tool", `${name} failed: ${result.error}`));
     completed.push({ id, name, result });
   }

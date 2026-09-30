@@ -117,7 +117,7 @@ export function ArtifactPanel({ artifact, visible, fullscreen, onToggleVisible, 
 function EmptyArtifact() {
   return (
     <div className="empty-artifact">
-      <p>Ask Ricky to show web results, charts, notes, records, code, images, or progress here.</p>
+      <p>Ask to see web results, charts, notes, records, code, images, or progress here.</p>
     </div>
   );
 }
@@ -137,7 +137,7 @@ function renderArtifact(artifact: RickyArtifact, mermaidState: MermaidState) {
         <div className="mermaid-output" dangerouslySetInnerHTML={{ __html: mermaidState.svg }} />
         {mermaidState.error ? (
           <details className="mermaid-repair">
-            <summary>Ricky repaired this chart so it would still display.</summary>
+            <summary>This chart was repaired so it would still display.</summary>
             <p>The original Mermaid syntax did not parse, so a safe fallback chart was shown.</p>
             <pre>{mermaidState.source}</pre>
           </details>
@@ -251,7 +251,7 @@ function ThumbnailBoard({ content }: { content: string }) {
         </div>
       ) : (
         <div className="thumbnail-empty">
-          <p>Reference image loaded. Ask Ricky: “Generate a 16:9 thumbnail of me about Cursor agents.”</p>
+          <p>Reference image loaded. Try: “Generate a 16:9 thumbnail of me about Cursor agents.”</p>
         </div>
       )}
     </section>

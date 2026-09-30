@@ -30,4 +30,11 @@ contextBridge.exposeInMainWorld("ricky", {
   setApiKey: (provider, value) => ipcRenderer.invoke("settings:set-key", { provider, value }),
   checkModel: (provider, model) => ipcRenderer.invoke("settings:check-model", { provider, model }),
   computerStatus: () => ipcRenderer.invoke("computer:status"),
+
+  // Wake word
+  prepareVoskModel: () => ipcRenderer.invoke("wake:prepare-vosk"),
+  clearVoskModel: () => ipcRenderer.invoke("wake:clear-vosk"),
+  porcupineAssets: () => ipcRenderer.invoke("wake:porcupine-assets"),
+  choosePorcupineKeyword: () => ipcRenderer.invoke("wake:choose-keyword"),
+  onWakeProgress: (callback) => subscribe("wake:progress", callback),
 });

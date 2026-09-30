@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { BrainCircuit, Expand, History, Keyboard, Mic, MicOff, MonitorCog, PanelRight, Send, Settings } from "lucide-react";
+import { BrainCircuit, Ear, EarOff, Expand, History, Keyboard, Mic, MicOff, MonitorCog, PanelRight, Send, Settings } from "lucide-react";
 import { ArtifactPanel } from "./components/ArtifactPanel";
 import { RickyFace } from "./components/RickyFace";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { createVoiceClient, newEntry, type MouthShape, type RickyConnectionState, type RickyMood, type TranscriptEntry, type VoiceClient } from "./lib/voice";
+import { WakeController, type WakeState } from "./lib/wake/controller";
 import type { RickyArtifact, RickySettings } from "./vite-env";
 
 type RickyMode = "display" | "computer";
@@ -19,30 +20,52 @@ export default function App() {
   const [showTypeInput, setShowTypeInput] = useState(false);
   const [mouthShape, setMouthShape] = useState<MouthShape>({ open: 0, width: 0.18, round: 0, teeth: 0 });
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([
-    newEntry("system", "Ricky is ready. Connect voice, then talk naturally."),
+    newEntry("system", "Ready. Connect voice, or turn on wake-word mode (ear button)."),
   ]);
   const [status, setStatus] = useState("Idle");
   const [textPrompt, setTextPrompt] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<RickySettings | null>(null);
   const [modeRequest, setModeRequest] = useState<string | null>(null);
+  const [wakeState, setWakeState] = useState<WakeState>("off");
+  const [wakeNotice, setWakeNotice] = useState("");
   const clientRef = useRef<VoiceClient | null>(null);
+  const settingsRef = useRef<RickySettings | null>(null);
+  const wakeRef = useRef<WakeController | null>(null);
 
   const isConnected = connectionState === "connected";
+  const assistantName = settings?.assistantName || "Ahdismoi";
+  const wakeOn = wakeState !== "off";
+  settingsRef.current = settings;
+
+  if (!wakeRef.current) {
+    wakeRef.current = new WakeController({
+      ensureClient: () => clientRef.current || createClient(),
+      onState: (state) => {
+        setWakeState(state);
+        if (state === "asleep" || state === "awake") setWakeNotice("");
+      },
+      onNotice: setWakeNotice,
+      log: addLog,
+    });
+  }
 
   useEffect(() => {
     void window.ricky.getSettings().then((bundle) => {
       setSettings(bundle.settings);
+      settingsRef.current = bundle.settings;
+      if (bundle.settings.wake.enabled) void startWake(bundle.settings);
       const voiceProvider = bundle.settings.tasks.voice.provider;
       if (!bundle.keys[voiceProvider]?.set) {
         addLog(`Add your ${bundle.providers[voiceProvider].label} API key in Settings (gear icon) to start.`);
       }
     });
     const offChanged = window.ricky.onModeChanged((nextMode) => applyMode(nextMode));
-    const offRequest = window.ricky.onModeRequest(({ reason }) => setModeRequest(reason || "Ricky wants to control your computer."));
+    const offRequest = window.ricky.onModeRequest(({ reason }) => setModeRequest(reason || ""));
     return () => {
       offChanged();
       offRequest();
+      void wakeRef.current?.disable(false);
     };
   }, []);
 
@@ -64,11 +87,15 @@ export default function App() {
     }
   }
 
-  async function connect() {
-    const current = settings || (await window.ricky.getSettings()).settings;
-    const client = createVoiceClient(current.tasks.voice.provider, {
+  function createClient(): VoiceClient {
+    const current = settingsRef.current;
+    const client = createVoiceClient(current?.tasks.voice.provider || "gemini", {
       onConnectionState: setConnectionState,
-      onMood: setMood,
+      onMood: (nextMood) => {
+        setMood(nextMood);
+        wakeRef.current?.onMood(nextMood);
+      },
+      onSleepRequested: () => wakeRef.current?.requestSleep(),
       onMouthShape: setMouthShape,
       onTranscript: (entry) => setTranscript((items) => [entry, ...items].slice(0, 80)),
       onArtifact: (nextArtifact) => {
@@ -82,16 +109,82 @@ export default function App() {
         setTranscript((items) => [newEntry("system", message), ...items].slice(0, 80));
       },
       onThumbnailReady: playThumbnailReadySound,
-    }, { pauseMicWhileSpeaking: current.pauseMicWhileSpeaking });
+    }, { pauseMicWhileSpeaking: current?.pauseMicWhileSpeaking === true });
     clientRef.current = client;
+    return client;
+  }
+
+  async function connect() {
+    if (wakeRef.current && wakeRef.current.current === "asleep") {
+      await wakeRef.current.wake();
+      return;
+    }
+    const client = clientRef.current || createClient();
     await client.connect();
   }
 
   function disconnect() {
+    if (wakeRef.current && wakeRef.current.current === "awake") {
+      wakeRef.current.goToSleep(true);
+      return;
+    }
     clientRef.current?.disconnect();
     clientRef.current = null;
     setStatus("Disconnected");
   }
+
+  async function startWake(current: RickySettings) {
+    try {
+      // A session opened before wake mode has stale instructions; start fresh on the first wake.
+      if (clientRef.current?.isConnected()) disconnect();
+      await wakeRef.current!.enable(current.wake);
+      addLog(`Wake-word mode is on. Say "${current.assistantName}" to start talking.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : String(error);
+      addLog(`Wake-word mode could not start: ${message}`);
+      setWakeNotice("");
+      await window.ricky.saveSettings({ wake: { enabled: false } }).then(setSettings);
+    }
+  }
+
+  async function toggleWake() {
+    const current = settingsRef.current || (await window.ricky.getSettings()).settings;
+    if (wakeOn) {
+      await wakeRef.current!.disable();
+      setSettings(await window.ricky.saveSettings({ wake: { enabled: false } }));
+      addLog("Wake-word mode is off.");
+      return;
+    }
+    const saved = await window.ricky.saveSettings({ wake: { enabled: true } });
+    setSettings(saved);
+    settingsRef.current = saved;
+    await startWake(saved);
+  }
+
+  async function onSettingsSaved(next: RickySettings) {
+    const previous = settingsRef.current;
+    setSettings(next);
+    settingsRef.current = next;
+    const wakeChanged = previous && JSON.stringify({ ...previous.wake, enabled: 0 }) !== JSON.stringify({ ...next.wake, enabled: 0 });
+    const voiceChanged = previous && JSON.stringify(previous.tasks.voice) !== JSON.stringify(next.tasks.voice);
+    if (voiceChanged && !clientRef.current?.isConnected()) clientRef.current = null;
+    if (wakeChanged && wakeOn) await startWake(next);
+  }
+
+  const micActive = wakeOn ? wakeState === "awake" : isConnected;
+  const micLabel = wakeOn ? (wakeState === "awake" ? "Go to sleep" : "Wake now") : isConnected ? "Disconnect voice" : "Connect voice";
+  const faceMood: RickyMood = wakeState === "asleep" || wakeState === "starting" ? "sleeping" : mood;
+  const wakeBadge =
+    wakeNotice ||
+    (wakeState === "starting"
+      ? "Starting wake word…"
+      : wakeState === "asleep"
+        ? `Say “${assistantName}”`
+        : wakeState === "waking"
+          ? "Waking up…"
+          : wakeState === "awake"
+            ? "Listening — say “that's all” when done"
+            : "");
 
   // The only path into computer mode: a user click in this window.
   async function switchMode(nextMode: RickyMode) {
@@ -112,8 +205,8 @@ export default function App() {
   if (mode === "computer") {
     return (
       <main className="app-shell app-shell-mini">
-        <section className="mini-companion" aria-label="Ricky computer use mini mode">
-          <RickyFace mood={mood} mouthShape={mouthShape} />
+        <section className="mini-companion" aria-label="Computer use mini mode">
+          <RickyFace mood={faceMood} mouthShape={mouthShape} name={assistantName} />
           <button
             className="mini-restore-button"
             onClick={() => void switchMode("display")}
@@ -134,14 +227,14 @@ export default function App() {
       {showSettings ? (
         <SettingsPanel
           onClose={() => setShowSettings(false)}
-          onSaved={setSettings}
+          onSaved={(next) => void onSettingsSaved(next)}
           voiceConnected={isConnected}
         />
       ) : null}
       {modeRequest ? (
         <div className="mode-request" role="alertdialog" aria-label="Computer control request">
           <MonitorCog size={16} />
-          <span>{modeRequest.startsWith("Ricky") ? modeRequest : `Ricky wants to control your computer: ${modeRequest}`}</span>
+          <span>{modeRequest ? `${assistantName} wants to control your computer: ${modeRequest}` : `${assistantName} wants to control your computer.`}</span>
           <button className="settings-button primary" onClick={() => void switchMode("computer")}>
             Allow computer control
           </button>
@@ -152,7 +245,8 @@ export default function App() {
       ) : null}
       <section className="companion-window">
         <section className="face-stage">
-          <RickyFace mood={mood} mouthShape={mouthShape} />
+          <RickyFace mood={faceMood} mouthShape={mouthShape} name={assistantName} />
+          {wakeBadge ? <div className={`wake-badge wake-${wakeState}`}>{wakeBadge}</div> : null}
         </section>
 
         <footer className="bottom-console">
@@ -165,7 +259,7 @@ export default function App() {
                   if (event.key === "Enter") sendTextPrompt();
                 }}
                 autoFocus
-                placeholder="Type to Ricky..."
+                placeholder={`Type to ${assistantName}...`}
               />
               <button onClick={sendTextPrompt} aria-label="Send typed prompt" title="Send typed prompt">
                 <Send size={15} />
@@ -175,19 +269,28 @@ export default function App() {
 
           <section className="control-strip">
             <button
-              className={isConnected ? "simple-button active" : "simple-button"}
-              onClick={isConnected ? disconnect : connect}
-              disabled={connectionState === "connecting"}
-              aria-label={isConnected ? "Disconnect voice" : "Connect voice"}
-              title={isConnected ? "Disconnect voice" : "Connect voice"}
+              className={micActive ? "simple-button active" : "simple-button"}
+              onClick={micActive ? disconnect : () => void connect()}
+              disabled={connectionState === "connecting" || wakeState === "starting" || wakeState === "waking"}
+              aria-label={micLabel}
+              title={micLabel}
             >
-              {isConnected ? <MicOff size={16} /> : <Mic size={16} />}
+              {micActive ? <MicOff size={16} /> : <Mic size={16} />}
+            </button>
+            <button
+              className={wakeOn ? "simple-button active" : "simple-button"}
+              onClick={() => void toggleWake()}
+              disabled={wakeState === "starting"}
+              aria-label={wakeOn ? "Turn off wake-word mode" : "Turn on wake-word mode"}
+              title={wakeOn ? "Wake-word mode is on. Click to turn off." : `Wake-word mode: always listen for “${assistantName}”`}
+            >
+              {wakeOn ? <Ear size={16} /> : <EarOff size={16} />}
             </button>
             <button
               className={showTypeInput ? "simple-button active" : "simple-button"}
               onClick={() => setShowTypeInput((value) => !value)}
-              aria-label="Type to Ricky"
-              title="Type to Ricky"
+              aria-label={`Type to ${assistantName}`}
+              title={`Type to ${assistantName}`}
             >
               <Keyboard size={16} />
             </button>
@@ -244,7 +347,7 @@ export default function App() {
               {transcript.map((entry) => (
                 <article className={`entry entry-${entry.role}`} key={entry.id}>
                   <div>
-                    <strong>{entry.role === "ricky" ? "Ricky" : entry.role}</strong>
+                    <strong>{entry.role === "ricky" ? assistantName : entry.role}</strong>
                     <time>{entry.at}</time>
                   </div>
                   <p>{entry.text}</p>

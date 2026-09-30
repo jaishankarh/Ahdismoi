@@ -67,7 +67,7 @@ export class OpenAIRealtimeClient implements VoiceClient {
       dc.addEventListener("open", () => {
         this.callbacks.onConnectionState("connected");
         this.callbacks.onMood("idle");
-        this.callbacks.onStatus(`Ricky is live (${session.model}). Start talking naturally.`);
+        this.callbacks.onStatus(`Live (${session.model}). Start talking naturally.`);
       });
       dc.addEventListener("message", (event) => void this.handleServerEvent(event.data));
 
@@ -108,9 +108,24 @@ export class OpenAIRealtimeClient implements VoiceClient {
     }
   }
 
+  isConnected(): boolean {
+    return this.dc?.readyState === "open";
+  }
+
+  setMicEnabled(enabled: boolean): void {
+    // A disabled WebRTC track sends silence.
+    this.micStream?.getAudioTracks().forEach((track) => {
+      track.enabled = enabled;
+    });
+  }
+
+  injectAudio(_samples: Int16Array): void {
+    // WebRTC streams live audio only; nothing to replay.
+  }
+
   sendText(text: string): void {
     if (!this.dc || this.dc.readyState !== "open") {
-      this.callbacks.onStatus("Connect Ricky before sending a text prompt.");
+      this.callbacks.onStatus("Connect voice before sending a text prompt.");
       return;
     }
     this.callbacks.onTranscript(newEntry("user", text));

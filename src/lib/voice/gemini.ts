@@ -2,22 +2,12 @@
 // reaches this page); this class captures the mic as 16 kHz PCM, plays back Gemini's 24 kHz PCM,
 // handles interruptions, transcripts, and tool calls.
 import type { RickyToolSpec } from "../../vite-env";
+import { mic, MIC_RATE, type MicFrame } from "../audio/mic";
 import { cleanError, MouthMeter, newEntry, runToolCalls, sanitizeToolResult, type VoiceCallbacks, type VoiceClient, type VoiceOptions } from "./common";
 
-const INPUT_RATE = 16000;
+const INPUT_RATE = MIC_RATE;
 const OUTPUT_RATE = 24000;
 const CHUNK_SAMPLES = INPUT_RATE / 10; // 100 ms per message
-
-const CAPTURE_WORKLET = `
-class RickyCapture extends AudioWorkletProcessor {
-  process(inputs) {
-    const channel = inputs[0] && inputs[0][0];
-    if (channel) this.port.postMessage(channel.slice(0));
-    return true;
-  }
-}
-registerProcessor("ricky-capture", RickyCapture);
-`;
 
 type GeminiPart = { inlineData?: { mimeType?: string; data?: string }; text?: string; thought?: boolean };
 type GeminiMessage = {
@@ -39,15 +29,14 @@ export class GeminiLiveClient implements VoiceClient {
   private toolSpecs: RickyToolSpec[] = [];
   private jsonStringArgs: Record<string, string[]> = {};
   private unsubscribers: Array<() => void> = [];
-  private micStream: MediaStream | null = null;
-  private inputContext: AudioContext | null = null;
+  private micUnsubscribe: (() => void) | null = null;
+  private micEnabled = true;
   private outputContext: AudioContext | null = null;
   private outputGain: GainNode | null = null;
   private playing = new Set<AudioBufferSourceNode>();
   private nextPlayTime = 0;
   private pending = new Int16Array(CHUNK_SAMPLES);
   private pendingLength = 0;
-  private resampleCarry = 0;
   private userText = "";
   private assistantText = "";
   private toolRunning = false;
@@ -85,7 +74,7 @@ export class GeminiLiveClient implements VoiceClient {
 
       this.callbacks.onConnectionState("connected");
       this.callbacks.onMood("idle");
-      this.callbacks.onStatus(`Ricky is live (${session.model}). Start talking naturally.`);
+      this.callbacks.onStatus(`Live (${session.model}). Start talking naturally.`);
     } catch (error) {
       this.callbacks.onConnectionState("error");
       this.callbacks.onMood("error");
@@ -102,7 +91,7 @@ export class GeminiLiveClient implements VoiceClient {
 
   sendText(text: string): void {
     if (!this.connected) {
-      this.callbacks.onStatus("Connect Ricky before sending a text prompt.");
+      this.callbacks.onStatus("Connect voice before sending a text prompt.");
       return;
     }
     this.callbacks.onTranscript(newEntry("user", text));
@@ -115,13 +104,11 @@ export class GeminiLiveClient implements VoiceClient {
     this.unsubscribers.forEach((unsubscribe) => unsubscribe());
     this.unsubscribers = [];
     if (wasConnected) void window.ricky.stopVoice();
-    this.micStream?.getTracks().forEach((track) => track.stop());
-    this.micStream = null;
+    this.micUnsubscribe?.();
+    this.micUnsubscribe = null;
     this.stopPlayback();
     this.meter.stop();
-    void this.inputContext?.close();
     void this.outputContext?.close();
-    this.inputContext = null;
     this.outputContext = null;
     this.outputGain = null;
     this.pendingLength = 0;
@@ -131,49 +118,46 @@ export class GeminiLiveClient implements VoiceClient {
 
   // ---------- Microphone ----------
 
-  private async startMic(): Promise<void> {
-    this.micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-    });
-    const context = new AudioContext();
-    this.inputContext = context;
-    const moduleUrl = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: "application/javascript" }));
-    await context.audioWorklet.addModule(moduleUrl);
-    URL.revokeObjectURL(moduleUrl);
-
-    const source = context.createMediaStreamSource(this.micStream);
-    const worklet = new AudioWorkletNode(context, "ricky-capture");
-    const sink = context.createGain();
-    sink.gain.value = 0; // keep the graph pulling without echoing the mic
-    source.connect(worklet).connect(sink).connect(context.destination);
-
-    const ratio = context.sampleRate / INPUT_RATE;
-    worklet.port.onmessage = (event: MessageEvent<Float32Array>) => {
-      if (!this.connected) return;
-      if (this.options.pauseMicWhileSpeaking && this.playing.size > 0) return;
-      this.pushSamples(event.data, ratio);
-    };
+  isConnected(): boolean {
+    return this.connected;
   }
 
-  /** Linear-interpolation resample to 16 kHz, convert to PCM16, and send in 100 ms chunks. */
-  private pushSamples(input: Float32Array, ratio: number): void {
-    let position = this.resampleCarry;
-    while (position < input.length) {
-      const index = Math.floor(position);
-      const fraction = position - index;
-      const a = input[index];
-      const b = index + 1 < input.length ? input[index + 1] : a;
-      const sample = Math.max(-1, Math.min(1, a + (b - a) * fraction));
-      this.pending[this.pendingLength++] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-      if (this.pendingLength === CHUNK_SAMPLES) {
-        window.ricky.sendGemini({
-          realtimeInput: { audio: { data: int16ToBase64(this.pending), mimeType: `audio/pcm;rate=${INPUT_RATE}` } },
-        });
-        this.pendingLength = 0;
-      }
-      position += ratio;
+  /** Gate the mic (used by wake-word mode). While off, nothing is sent to Gemini. */
+  setMicEnabled(enabled: boolean): void {
+    if (this.micEnabled === enabled) return;
+    this.micEnabled = enabled;
+    if (!enabled) this.flushPending(); // send the tail of what was said, then go quiet
+  }
+
+  /** Send already-captured audio (e.g. what the user said right after the wake word). */
+  injectAudio(samples: Int16Array): void {
+    if (!this.connected) return;
+    this.appendSamples(samples);
+  }
+
+  private async startMic(): Promise<void> {
+    this.micUnsubscribe = await mic.subscribe((frame: MicFrame) => {
+      if (!this.connected || !this.micEnabled) return;
+      if (this.options.pauseMicWhileSpeaking && this.playing.size > 0) return;
+      this.appendSamples(frame.samples);
+    });
+  }
+
+  /** Buffer PCM16 at 16 kHz and send it in 100 ms chunks. */
+  private appendSamples(samples: Int16Array): void {
+    for (let i = 0; i < samples.length; i += 1) {
+      this.pending[this.pendingLength++] = samples[i];
+      if (this.pendingLength === CHUNK_SAMPLES) this.flushPending();
     }
-    this.resampleCarry = position - input.length;
+  }
+
+  private flushPending(): void {
+    if (this.pendingLength === 0) return;
+    const chunk = this.pending.subarray(0, this.pendingLength);
+    window.ricky.sendGemini({
+      realtimeInput: { audio: { data: int16ToBase64(chunk), mimeType: `audio/pcm;rate=${INPUT_RATE}` } },
+    });
+    this.pendingLength = 0;
   }
 
   // ---------- Playback ----------

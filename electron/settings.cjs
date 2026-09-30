@@ -13,7 +13,10 @@ const PROVIDERS = {
   openai: { label: "OpenAI", envKey: "OPENAI_API_KEY", keyUrl: "https://platform.openai.com/api-keys" },
   openrouter: { label: "OpenRouter", envKey: "OPENROUTER_API_KEY", keyUrl: "https://openrouter.ai/keys" },
   exa: { label: "Exa", envKey: "EXA_API_KEY", keyUrl: "https://dashboard.exa.ai/api-keys" },
+  picovoice: { label: "Picovoice (wake word)", envKey: "PICOVOICE_ACCESS_KEY", keyUrl: "https://console.picovoice.ai/" },
 };
+
+const DEFAULT_VOSK_MODEL = "https://alphacephei.com/vosk/models/vosk-model-small-fr-0.22.zip";
 
 // Which providers each task supports, with suggested models. Any model ID can be typed in the UI;
 // presets are only suggestions.
@@ -73,6 +76,17 @@ const VOICE_PRESETS = {
 function defaultSettings() {
   return {
     userName: "",
+    assistantName: "Ahdismoi",
+    wake: {
+      enabled: false,
+      engine: "vosk",
+      phrase: "ah dis moi",
+      sensitivity: 0.5,
+      sleepAfterSeconds: 10,
+      voskModelUrl: DEFAULT_VOSK_MODEL,
+      porcupineLanguage: "fr",
+      porcupineKeywordName: "",
+    },
     tasks: {
       voice: { provider: "gemini", model: "gemini-3.8-live", voiceName: "Charon" },
       imageGenerate: { provider: "gemini", model: "gemini-3.1-flash-image" },
@@ -120,6 +134,17 @@ function normalizeSettings(raw) {
     next.tasks[task] = merged;
   }
   next.userName = String(next.userName || "").slice(0, 60);
+  next.assistantName = String(next.assistantName || "").trim().slice(0, 40) || base.assistantName;
+  const wake = { ...base.wake, ...(raw?.wake && typeof raw.wake === "object" ? raw.wake : {}) };
+  wake.enabled = wake.enabled === true;
+  wake.engine = wake.engine === "porcupine" ? "porcupine" : "vosk";
+  wake.phrase = String(wake.phrase || "").toLowerCase().replace(/[^\p{L}\p{N}' ]+/gu, " ").replace(/\s+/g, " ").trim() || base.wake.phrase;
+  wake.sensitivity = Math.min(1, Math.max(0, Number.isFinite(Number(wake.sensitivity)) ? Number(wake.sensitivity) : base.wake.sensitivity));
+  wake.sleepAfterSeconds = Math.min(300, Math.max(3, Math.round(Number(wake.sleepAfterSeconds) || base.wake.sleepAfterSeconds)));
+  wake.voskModelUrl = String(wake.voskModelUrl || "").trim() || DEFAULT_VOSK_MODEL;
+  wake.porcupineLanguage = wake.porcupineLanguage === "en" ? "en" : "fr";
+  wake.porcupineKeywordName = String(wake.porcupineKeywordName || "");
+  next.wake = wake;
   next.pauseMicWhileSpeaking = next.pauseMicWhileSpeaking === true;
   return next;
 }
@@ -135,6 +160,7 @@ async function saveSettings(partial) {
     ...current,
     ...partial,
     tasks: { ...current.tasks },
+    wake: { ...current.wake, ...(partial?.wake || {}) },
   };
   for (const [task, value] of Object.entries(partial?.tasks || {})) {
     merged.tasks[task] = { ...current.tasks[task], ...value };
@@ -220,6 +246,7 @@ async function keyStatus() {
 }
 
 module.exports = {
+  DEFAULT_VOSK_MODEL,
   PROVIDERS,
   TASKS,
   VOICE_PRESETS,

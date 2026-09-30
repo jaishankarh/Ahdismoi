@@ -10,6 +10,9 @@ const settingsStore = require("./settings.cjs");
 const providers = require("./providers.cjs");
 const computer = require("./computer.cjs");
 const { createOpenAISession, GeminiLiveSession } = require("./voice.cjs");
+const wake = require("./wake.cjs");
+
+wake.registerScheme();
 
 let geminiSession = null;
 
@@ -25,10 +28,18 @@ let mainWindow = null;
 let normalWindowBounds = null;
 let dbWriteQueue = Promise.resolve();
 
-function buildInstructions(userName) {
+function buildInstructions(userName, assistantName = "Ahdismoi", wakeEnabled = false) {
   const name = userName || "the user";
+  const me = assistantName || "Ahdismoi";
+  const wakeSection = wakeEnabled
+    ? `
+
+# Wake Word Mode
+Wake-word mode is on. The user wakes you by saying your name ("${me}"). Audio you receive may begin with the wake word; ignore it and respond to what follows. If they only said the wake word, reply with a very short "Yes?" or similar.
+When the user ends the conversation (e.g. "that's all", "thanks, bye", "merci", "go to sleep"), say a brief goodbye and call go_to_sleep.`
+    : "";
   return `# Role and Objective
-You are Ricky, ${name}'s desktop AI operator. You speak through realtime voice and can use local tools.
+You are ${me}, ${name}'s desktop AI operator.${me.toLowerCase() === "ahdismoi" ? ' Your name is pronounced the French way: "ah-dis-moi" (from "Ah, dis-moi", "Ah, tell me").' : ""} You speak through realtime voice and can use local tools.
 
 # Personality and Tone
 Concise, calm, useful. Talk like a smart operator, not a chatbot.
@@ -43,7 +54,7 @@ Concise, calm, useful. Talk like a smart operator, not a chatbot.
 
 # Tool Behavior
 - Use read-only tools when the user's intent is clear.
-- When ${name} says "show me the menu", "show me what I can do", or asks what Ricky can do, call show_menu immediately.
+- When ${name} says "show me the menu", "show me what I can do", or asks what you can do, call show_menu immediately.
 - For web search, notes, charts, records, image generation, and artifact display, act directly when the request is clear.
 - For thumbnail creation/editing, always use the thumbnail board tools, never generic image_generate and never artifact_show with imageLoading. Generate exactly one 16:9 image per request. Never generate multiple unless ${name} separately asks again. Every generate/edit request gets a permanent database number that never changes, like #18 then #19 then #20. Do not renumber visible grid positions. Show paginated 3x3 pages of the permanent numbers. Do not show a standalone fullscreen loading animation for thumbnails. Use ${name}'s wording literally: do not invent elaborate extra concepts, fake text, or extra thumbnail ideas. For edits, use the exact existing numbered/selected image as input and make only the requested change.
 - The thumbnail board persists across sessions. If ${name} references thumbnail #N, trust that permanent number and call the matching thumbnail tool. Do not say you cannot see old thumbnails. Use thumbnail_grid to refresh state or change pages if needed.
@@ -58,7 +69,7 @@ Use artifacts for menus, web results, graphics, notes, database tables, code sni
 For Mermaid charts, keep syntax simple: start with flowchart TD, avoid markdown fences, avoid parentheses in node labels, and use short alphanumeric node IDs.
 
 # Audio
-Let the user interrupt. If audio is unclear, ask one short clarifying question instead of guessing.`;
+Let the user interrupt. If audio is unclear, ask one short clarifying question instead of guessing.${wakeSection}`;
 }
 
 const toolSpecs = [
@@ -95,7 +106,17 @@ const toolSpecs = [
   {
     type: "function",
     name: "show_menu",
-    description: "Show Ricky's capability menu in the artifact panel. Call this when the user asks 'show me the menu', 'show me what I can do', or asks what Ricky can do.",
+    description: "Show the assistant's capability menu in the artifact panel. Call this when the user asks 'show me the menu', 'show me what I can do', or asks what you can do.",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+  {
+    type: "function",
+    name: "go_to_sleep",
+    description: "In wake-word mode, stop listening and go back to waiting for the wake word. Call after a brief goodbye when the user ends the conversation.",
     parameters: {
       type: "object",
       properties: {},
@@ -147,7 +168,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "thumbnail_generate",
-    description: "Generate exactly one 16:9 YouTube thumbnail into Ricky's persistent paginated thumbnail board. Uses the user's reference images if available. Assigns a new permanent number that never changes. Never generate multiple at once.",
+    description: "Generate exactly one 16:9 YouTube thumbnail into the persistent paginated thumbnail board. Uses the user's reference images if available. Assigns a new permanent number that never changes. Never generate multiple at once.",
     parameters: {
       type: "object",
       properties: {
@@ -213,7 +234,7 @@ const toolSpecs = [
   {
     type: "function",
     name: "note_add",
-    description: "Add a note to Ricky's fun local notes list.",
+    description: "Add a note to the local notes list.",
     parameters: {
       type: "object",
       properties: {
@@ -506,7 +527,7 @@ async function createWindow() {
     height: 760,
     minWidth: 420,
     minHeight: 520,
-    title: "Ricky",
+    title: "Ahdismoi",
     frame: false,
     transparent: true,
     backgroundColor: "#00000000",
@@ -591,7 +612,7 @@ function setMode(mode) {
 async function sessionInstructions() {
   const settings = await settingsStore.getSettings();
   const db = await readDb();
-  return `${buildInstructions(settings.userName)}\n\n${buildThumbnailBoardInstructions(db, settings.userName || "the user")}`;
+  return `${buildInstructions(settings.userName, settings.assistantName, settings.wake.enabled)}\n\n${buildThumbnailBoardInstructions(db, settings.userName || "the user")}`;
 }
 
 // Only the renderer's own UI (a user click) can switch into computer mode.
@@ -658,6 +679,13 @@ ipcMain.handle("settings:check-model", async (_event, { provider, model }) => {
 
 ipcMain.handle("computer:status", async () => computer.status());
 
+ipcMain.handle("wake:prepare-vosk", async () =>
+  wake.prepareVoskModel((progress) => sendToRenderer("wake:progress", progress)),
+);
+ipcMain.handle("wake:clear-vosk", async () => wake.clearVoskCache());
+ipcMain.handle("wake:porcupine-assets", async () => wake.porcupineAssets());
+ipcMain.handle("wake:choose-keyword", async () => wake.choosePorcupineKeyword(mainWindow));
+
 ipcMain.handle("tools:execute", async (_event, toolCall) => {
   const name = String(toolCall?.name || "");
   const args = asObject(toolCall?.arguments);
@@ -676,8 +704,12 @@ ipcMain.handle("tools:execute", async (_event, toolCall) => {
       return {
         ok: true,
         mode,
-        artifact: { title: "Ricky Mode", kind: "progress", content: `Mode is ${mode === "computer" ? "computer use" : "display"}.` },
+        artifact: { title: "Mode", kind: "progress", content: `Mode is ${mode === "computer" ? "computer use" : "display"}.` },
       };
+    }
+
+    if (name === "go_to_sleep") {
+      return { ok: true, sleep: true, message: "Going back to sleep after you finish speaking." };
     }
 
     if (name === "artifact_show") {
@@ -688,9 +720,9 @@ ipcMain.handle("tools:execute", async (_event, toolCall) => {
       return {
         ok: true,
         artifact: {
-          title: "Ricky Menu",
+          title: "Menu",
           kind: "markdown",
-          content: buildMenuMarkdown(),
+          content: buildMenuMarkdown((await settingsStore.getSettings()).assistantName),
         },
       };
     }
@@ -972,7 +1004,7 @@ async function webSearch(args) {
 function formatSearchMarkdown(query, answer, results) {
   const cleanQuery = query.trim() || "Search";
   if (!answer && results.length === 0) {
-    return `# ${cleanQuery}\n\nNo strong web results came back for this search. Try a narrower query or ask Ricky to search a specific site.`;
+    return `# ${cleanQuery}\n\nNo strong web results came back for this search. Try a narrower query or a specific site.`;
   }
 
   const sections = results.slice(0, 8).map((result, index) => {
@@ -987,7 +1019,7 @@ function formatSearchMarkdown(query, answer, results) {
 
   const parts = [`# ${cleanQuery}`];
   if (answer) parts.push(answer.trim(), "## Sources");
-  else parts.push(`Ricky found ${results.length} source${results.length === 1 ? "" : "s"}.`);
+  else parts.push(`Found ${results.length} source${results.length === 1 ? "" : "s"}.`);
   return [...parts, ...sections].join("\n\n");
 }
 
@@ -1006,16 +1038,21 @@ function hostname(url) {
   }
 }
 
-function buildMenuMarkdown() {
-  return `# Ricky Menu
+function buildMenuMarkdown(me = "Ahdismoi") {
+  return `# ${me} Menu
 
 Here is what you can ask me to do.
 
 ## Voice and Conversation
 
-- Talk naturally with Ricky in realtime.
+- Talk naturally with ${me} in realtime.
 - Interrupt mid-response and ask follow-ups.
 - Ask unrelated questions while tools keep running.
+
+## Wake Word
+
+- Turn on wake-word mode with the ear button, then say "${me}" to start talking.
+- Say "that's all" or "merci" to send ${me} back to sleep.
 
 ## Artifacts Panel
 
@@ -1038,14 +1075,14 @@ Here is what you can ask me to do.
 
 ## Notes and Records
 
-- Add notes to Ricky's local note grid.
+- Add notes to the local note grid.
 - Create, search, update, and confirm-delete local database records.
 
 ## Computer Use Mode
 
 - Turn on computer control with the monitor button (only you can).
 - Open apps, look at the screen, click, type, use shortcuts, scroll, and inspect the UI.
-- Ricky asks before risky actions like sending, deleting, buying, changing settings, or sharing private info.
+- ${me} asks before risky actions like sending, deleting, buying, changing settings, or sharing private info.
 
 ## Good Starter Prompts
 
@@ -1525,10 +1562,13 @@ function normalizeMermaidDiagram(diagram, title) {
 
 function fallbackMermaidDiagram(title) {
   const safeTitle = String(title || "Chart").replace(/["<>]/g, "");
-  return `flowchart TD\n  A["${safeTitle}"] --> B["Chart request received"]\n  B --> C["Ricky will show a safe fallback if syntax fails"]`;
+  return `flowchart TD\n  A["${safeTitle}"] --> B["Chart request received"]\n  B --> C["A safe fallback is shown if syntax fails"]`;
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  wake.handleProtocol();
+  return createWindow();
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

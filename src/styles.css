@@ -370,7 +370,7 @@ button:disabled {
 .control-strip {
   display: grid;
   width: max-content;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -1505,4 +1505,74 @@ textarea {
 
 .mode-request span {
   flex: 1 1 220px;
+}
+
+/* ---------- Wake-word mode ---------- */
+
+.face-sleeping {
+  border-color: rgba(86, 189, 255, 0.32);
+  animation: sleep-breathe 4.8s infinite ease-in-out;
+}
+
+.face-sleeping .eye {
+  height: clamp(10px, 0.9vw, 14px);
+  animation: none;
+  opacity: 0.7;
+}
+
+.face-sleeping .eye span {
+  display: none;
+}
+
+.face-sleeping .mouth {
+  opacity: 0.5;
+}
+
+@keyframes sleep-breathe {
+  0%,
+  100% {
+    transform: translateY(-42px) scale(1);
+  }
+  50% {
+    transform: translateY(-42px) scale(0.985);
+  }
+}
+
+.face-stage {
+  position: relative;
+}
+
+.wake-badge {
+  position: absolute;
+  bottom: 86px;
+  left: 50%;
+  max-width: calc(100% - 32px);
+  padding: 6px 12px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(125, 223, 255, 0.25);
+  border-radius: 999px;
+  background: rgba(10, 14, 20, 0.85);
+  color: #bfe9ff;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.wake-awake {
+  border-color: rgba(123, 227, 164, 0.45);
+  color: #bdf5d2;
+}
+
+.app-shell-mini .wake-badge {
+  display: none;
+}
+
+.settings-row input[type="range"] {
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: #7ddfff;
 }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, CircleAlert, ExternalLink, KeyRound, LoaderCircle, X } from "lucide-react";
 import { cleanError } from "../lib/voice";
-import type { ComputerStatus, ProviderId, RickySettings, SettingsBundle, TaskId } from "../vite-env";
+import type { ComputerStatus, ProviderId, RickySettings, SettingsBundle, TaskId, WakeSettings } from "../vite-env";
 
 type Props = {
   onClose: () => void;
@@ -43,7 +43,26 @@ export function SettingsPanel({ onClose, onSaved, voiceConnected }: Props) {
     );
   }
 
-  const neededProviders = new Set(TASK_ORDER.map((task) => draft.tasks[task].provider));
+  const neededProviders = new Set<ProviderId>(TASK_ORDER.map((task) => draft.tasks[task].provider));
+  if (draft.wake.engine === "porcupine") neededProviders.add("picovoice");
+
+  function updateWake(patch: Partial<WakeSettings>) {
+    setDraft((current) => (current ? { ...current, wake: { ...current.wake, ...patch } } : current));
+    setSavedNote("");
+  }
+
+  async function chooseKeyword() {
+    const saved = await window.ricky.choosePorcupineKeyword();
+    if (saved) {
+      setBundle((current) => (current ? { ...current, settings: { ...current.settings, wake: { ...current.settings.wake, porcupineKeywordName: saved.wake.porcupineKeywordName } } } : current));
+      updateWake({ porcupineKeywordName: saved.wake.porcupineKeywordName });
+    }
+  }
+
+  async function redownloadVosk() {
+    await window.ricky.clearVoskModel();
+    setSavedNote("The wake-word model will be downloaded again next time wake-word mode starts.");
+  }
 
   function updateTask(task: TaskId, patch: Partial<RickySettings["tasks"][TaskId]>) {
     setDraft((current) => {
@@ -167,6 +186,74 @@ export function SettingsPanel({ onClose, onSaved, voiceConnected }: Props) {
           </section>
 
           <section className="settings-section">
+            <h3>Wake word</h3>
+            <p className="settings-hint">
+              Turn wake-word mode on with the ear button. Listening happens on this computer; nothing is sent anywhere until the wake word is heard.
+            </p>
+            <div className="settings-row">
+              <label>
+                <span>Engine</span>
+                <select value={draft.wake.engine} onChange={(event) => updateWake({ engine: event.target.value as WakeSettings["engine"] })}>
+                  <option value="vosk">Vosk (offline, free)</option>
+                  <option value="porcupine">Picovoice Porcupine</option>
+                </select>
+              </label>
+              <label>
+                <span>Sensitivity: {Math.round(draft.wake.sensitivity * 100)}%</span>
+                <input type="range" min={0} max={1} step={0.05} value={draft.wake.sensitivity} onChange={(event) => updateWake({ sensitivity: Number(event.target.value) })} />
+              </label>
+              <label>
+                <span>Sleep after silence (seconds)</span>
+                <input type="number" min={3} max={300} value={draft.wake.sleepAfterSeconds} onChange={(event) => updateWake({ sleepAfterSeconds: Number(event.target.value) })} />
+              </label>
+            </div>
+            {draft.wake.engine === "vosk" ? (
+              <>
+                <div className="settings-row">
+                  <label className="grow">
+                    <span>Wake phrase, as the speech model spells it</span>
+                    <input value={draft.wake.phrase} spellCheck={false} onChange={(event) => updateWake({ phrase: event.target.value })} />
+                  </label>
+                </div>
+                <p className="settings-muted">
+                  "ah dis moi" is how the French model hears "Ahdismoi". Every word must exist in the model's vocabulary. Raise sensitivity if it misses you; lower it if it wakes up by itself.
+                </p>
+                <div className="settings-row">
+                  <label className="grow">
+                    <span>Vosk model (.zip or .tar.gz URL, downloaded once, ~40 MB)</span>
+                    <input value={draft.wake.voskModelUrl} spellCheck={false} onChange={(event) => updateWake({ voskModelUrl: event.target.value })} />
+                  </label>
+                  <button className="settings-button" onClick={() => void redownloadVosk()}>
+                    Re-download
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="settings-muted">
+                  In the Picovoice Console, create a wake word "Ahdismoi" (language {draft.wake.porcupineLanguage === "fr" ? "French" : "English"}, platform Web/WASM), download the .ppn file, and choose it here. Add your AccessKey under API keys.
+                </p>
+                <div className="settings-row">
+                  <label>
+                    <span>Keyword language</span>
+                    <select value={draft.wake.porcupineLanguage} onChange={(event) => updateWake({ porcupineLanguage: event.target.value as WakeSettings["porcupineLanguage"] })}>
+                      <option value="fr">French</option>
+                      <option value="en">English</option>
+                    </select>
+                  </label>
+                  <label className="grow">
+                    <span>Keyword file</span>
+                    <input readOnly value={draft.wake.porcupineKeywordName || "None chosen"} />
+                  </label>
+                  <button className="settings-button" onClick={() => void chooseKeyword()}>
+                    Choose .ppn…
+                  </button>
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="settings-section">
             <h3>API keys</h3>
             <p className="settings-hint">
               {bundle.encryption.strong
@@ -218,13 +305,19 @@ export function SettingsPanel({ onClose, onSaved, voiceConnected }: Props) {
             <h3>General</h3>
             <div className="settings-row">
               <label className="grow">
-                <span>Your name (Ricky uses it when talking to you)</span>
+                <span>Assistant name</span>
+                <input value={draft.assistantName} onChange={(event) => setDraft({ ...draft, assistantName: event.target.value })} placeholder="Ahdismoi" />
+              </label>
+            </div>
+            <div className="settings-row">
+              <label className="grow">
+                <span>Your name (the assistant uses it when talking to you)</span>
                 <input value={draft.userName} onChange={(event) => setDraft({ ...draft, userName: event.target.value })} placeholder="e.g. Jai" />
               </label>
             </div>
             <label className="settings-check">
               <input type="checkbox" checked={draft.pauseMicWhileSpeaking} onChange={(event) => setDraft({ ...draft, pauseMicWhileSpeaking: event.target.checked })} />
-              <span>Pause the mic while Ricky talks (Gemini only). Turn on if Ricky keeps interrupting itself on speakers; you won't be able to interrupt it.</span>
+              <span>Pause the mic while the assistant talks (Gemini only). Turn on if it keeps interrupting itself on speakers; you won't be able to interrupt it.</span>
             </label>
           </section>
 

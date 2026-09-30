@@ -39,13 +39,26 @@ export type RickyToolResult = {
   [key: string]: unknown;
 };
 
-export type ProviderId = "gemini" | "openai" | "openrouter" | "exa";
+export type ProviderId = "gemini" | "openai" | "openrouter" | "exa" | "picovoice";
 export type TaskId = "voice" | "imageGenerate" | "imageEdit" | "search" | "vision";
 
 export type TaskSetting = { provider: ProviderId; model: string; voiceName?: string };
 
+export type WakeSettings = {
+  enabled: boolean;
+  engine: "vosk" | "porcupine";
+  phrase: string;
+  sensitivity: number;
+  sleepAfterSeconds: number;
+  voskModelUrl: string;
+  porcupineLanguage: "fr" | "en";
+  porcupineKeywordName: string;
+};
+
 export type RickySettings = {
   userName: string;
+  assistantName: string;
+  wake: WakeSettings;
   tasks: Record<TaskId, TaskSetting>;
   pauseMicWhileSpeaking: boolean;
 };
@@ -81,10 +94,17 @@ declare global {
       onModeChanged: (callback: (mode: "display" | "computer") => void) => () => void;
       onModeRequest: (callback: (info: { reason: string }) => void) => () => void;
       getSettings: () => Promise<SettingsBundle>;
-      saveSettings: (partial: Partial<RickySettings> & { tasks?: Partial<Record<TaskId, Partial<TaskSetting>>> }) => Promise<RickySettings>;
+      saveSettings: (
+        partial: Partial<Omit<RickySettings, "tasks" | "wake">> & { tasks?: Partial<Record<TaskId, Partial<TaskSetting>>>; wake?: Partial<WakeSettings> },
+      ) => Promise<RickySettings>;
       setApiKey: (provider: ProviderId, value: string) => Promise<SettingsBundle["keys"]>;
       checkModel: (provider: ProviderId, model: string) => Promise<{ ok: boolean; message: string }>;
       computerStatus: () => Promise<ComputerStatus>;
+      prepareVoskModel: () => Promise<{ modelUrl: string; cached: boolean }>;
+      clearVoskModel: () => Promise<void>;
+      porcupineAssets: () => Promise<{ accessKey: string; keywordBase64: string; modelBase64: string; modelVersion: string }>;
+      choosePorcupineKeyword: () => Promise<RickySettings | null>;
+      onWakeProgress: (callback: (progress: unknown) => void) => () => void;
     };
   }
 }

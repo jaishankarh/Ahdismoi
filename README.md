@@ -1,6 +1,8 @@
-# RileyJarvis
+# Ahdismoi
 
-A local desktop AI companion you talk to. It has realtime voice, a visual artifact panel, image and thumbnail generation, web search, notes and records, and opt-in computer control on **macOS and Linux**.
+*(pronounced "ah-dis-moi", French for "ah, tell me")*
+
+A local desktop AI companion you talk to, forked from RileyJarvis. It has realtime voice, a visual artifact panel, image and thumbnail generation, web search, notes and records, and opt-in computer control on **macOS and Linux**.
 
 Built with Electron, React, Vite and TypeScript. This fork adds:
 
@@ -10,6 +12,8 @@ Built with Electron, React, Vite and TypeScript. This fork adds:
 - **Ricky can see the screen.** Screenshots go to a vision model, which returns clickable elements with coordinates, so clicks aren't blind guesses.
 - **Only you can turn on computer control.** The assistant can ask, but you have to click to allow it.
 - **API keys are managed in the app** and encrypted with your OS keychain.
+- **Wake-word mode.** It listens on-device for "Ahdismoi", then talks. It goes back to sleep after silence or when you say "that's all".
+- **The assistant's name is a setting** (default: Ahdismoi).
 
 ## Features
 
@@ -20,6 +24,29 @@ Built with Electron, React, Vite and TypeScript. This fork adds:
 - Web search with source links: Gemini + Google Search (default), OpenAI, OpenRouter or Exa.
 - Local notes and records stored under `data/`.
 - Computer control: open apps, look at the screen, click, type, keyboard shortcuts, scroll and inspect windows.
+
+## Wake-word mode
+
+Click the **ear button** to turn it on; it stays on across restarts until you turn it off.
+
+1. **Asleep:** the face closes its eyes, and a speech engine on your computer listens only for the wake word. No audio leaves your machine.
+2. Say **"Ahdismoi"**, or "Ahdismoi, open Firefox" in one breath. A chime plays and the voice session opens. Anything you said right after the wake word is passed along, so you don't have to pause.
+3. **Awake:** talk normally, and interrupt whenever you like.
+4. It goes back to sleep (falling chime) after a few seconds of silence (adjustable), or when you say "that's all", "merci" or "go to sleep". An idle voice session is closed after 5 minutes asleep, so it costs nothing.
+
+The mic button wakes it or sends it to sleep by hand.
+
+Two wake-word engines (Settings → Wake word):
+
+| Engine | Setup | Notes |
+|---|---|---|
+| **Vosk** (default) | Nothing. A ~40 MB French speech model downloads once on first use. | Free and open source. Listens for the phrase "ah dis moi". It may occasionally wake on French sentences that contain "dis-moi"; lower the sensitivity if so. |
+| **Picovoice Porcupine** | Free account at [console.picovoice.ai](https://console.picovoice.ai/): copy your AccessKey, create the wake word "Ahdismoi" (French, platform Web/WASM), download the `.ppn` file. In Settings, paste the key under API keys and choose the file. | A dedicated wake-word engine. More accurate and lighter on CPU. The French and English model files are bundled. |
+
+Tips:
+
+- **Sensitivity:** raise it if the wake word gets missed; lower it if it wakes by itself.
+- **Speakers vs headphones:** if it interrupts itself when using speakers, turn on "Pause the mic while the assistant talks".
 
 ## Default models
 
@@ -42,8 +69,8 @@ Model IDs change often. If one stops working, pick another in **Settings → Mod
 ## Quick start
 
 ```bash
-git clone <your fork URL> rileyjarvis
-cd rileyjarvis
+git clone https://github.com/jaishankarh/Ahdismoi.git
+cd Ahdismoi
 npm install
 npm run dev
 ```
@@ -111,8 +138,12 @@ electron/
   providers.cjs  image / search / vision / model-check adapters (Gemini, OpenAI, OpenRouter, Exa)
   voice.cjs      OpenAI Realtime token minting; Gemini Live WebSocket with auto-resume
   computer.cjs   macOS / Linux X11 / Linux Wayland computer control backends
+  wake.cjs       wake-word model download/convert, local asset protocol, Porcupine files
+  assets/        bundled Porcupine language models (French, English)
 src/
   lib/voice/     Gemini Live + OpenAI Realtime clients behind one interface
+  lib/audio/     shared 16 kHz microphone capture + ring buffer
+  lib/wake/      wake-word listener (Vosk / Porcupine) and sleep/wake controller
   components/    face, artifact panel, settings panel
 scripts/
   setup-linux.sh
@@ -120,4 +151,4 @@ scripts/
 
 ## License
 
-MIT
+MIT. Bundled Porcupine model files are © Picovoice, under Apache 2.0. The default Vosk French model (downloaded at runtime) is by Alpha Cephei, under Apache 2.0.

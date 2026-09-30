@@ -4,9 +4,10 @@ import type { MouthShape, RickyMood } from "../lib/voice";
 type RickyFaceProps = {
   mood: RickyMood;
   mouthShape: MouthShape;
+  name?: string;
 };
 
-export function RickyFace({ mood, mouthShape }: RickyFaceProps) {
+export function RickyFace({ mood, mouthShape, name = "Assistant" }: RickyFaceProps) {
   return (
     <div
       className={`face face-${mood}`}
@@ -18,7 +19,7 @@ export function RickyFace({ mood, mouthShape }: RickyFaceProps) {
           "--mouth-teeth": mouthShape.teeth.toFixed(3),
         } as CSSProperties
       }
-      aria-label={`Ricky mood: ${mood}`}
+      aria-label={`${name} mood: ${mood}`}
     >
       <div className="eye-row">
         <div className="eye">
