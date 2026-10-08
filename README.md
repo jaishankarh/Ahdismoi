@@ -526,6 +526,8 @@ scripts/
   electron-dev.cjs   cross-platform Electron launcher for `npm run dev`
 ```
 
+Agent runs: `.weave/compose.yaml` is the Run recipe for AI Workflow Weave. Ahdismoi has no services of its own; the recipe only depends on the chat app (`sri-aurobindo-works-chat`), whose backend an agent reaches as `backend.sri-aurobindo-works-chat`. It holds no secrets. `npm run typecheck` and `npm run build` run in the working copy and need nothing from it.
+
 Adding a model or provider:
 
 - **Model presets:** edit `TASKS` in `electron/settings.cjs`.

@@ -1,0 +1,8 @@
+# Run recipe for agent runs (read by the workflow, not a developer compose file).
+# Ahdismoi is an Electron desktop app with no services of its own; what an agent needs from an
+# Environment is the chat app's backend and databases, reachable as
+# `backend.sri-aurobindo-works-chat`. No secrets: the chat app's recipe names its own.
+# Ahdismoi's typecheck and build (`npm run typecheck`, `npm run build`) run in the working copy
+# and need nothing from this file.
+x-weave:
+  depends_on: [sri-aurobindo-works-chat]
